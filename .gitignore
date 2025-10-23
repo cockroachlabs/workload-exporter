@@ -63,3 +63,5 @@ tmp/
 
 # Misc
 workload-export.go
+workload-export.zip
+workload-export/
