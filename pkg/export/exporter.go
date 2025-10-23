@@ -281,7 +281,7 @@ func (exporter *Exporter) createStatements(db string) ([]string, error) {
 
 	var creates []string
 
-	_, err := exporter.Db.Exec(context.Background(), fmt.Sprintf("USE %s", db))
+	_, err := exporter.Db.Exec(context.Background(), fmt.Sprintf("USE \"%s\"", db))
 	if err != nil {
 		return creates, err
 	}
