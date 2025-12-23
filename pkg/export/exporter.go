@@ -42,6 +42,9 @@ type Metadata struct {
 	Timestamp                   time.Time     `json:"timestamp"`
 	ExportConfig                Config        `json:"export_config"`
 	ClusterVersion              string        `json:"cluster_version"`
+	ClusterId                   string        `json:"cluster_id"`
+	ClusterName                 string        `json:"cluster_name"`
+	Organization                string        `json:"organization"`
 	SqlStatsAggregationInterval time.Duration `json:"sql.stats.aggregation.interval"`
 	SqlStatsFlushInterval       time.Duration `json:"sql.stats.flush.interval"`
 }
@@ -63,7 +66,7 @@ func NewExporter(config Config) (*Exporter, error) {
 	ctx := context.Background()
 	cleanConnStr, err := cleanConnectionString(config.ConnectionString)
 	if err != nil {
-		return nil, fmt.Errorf("failed to clean connection string %w", err)
+		return nil, fmt.Errorf("failed to clean connection string: %w", err)
 	}
 
 	logrus.Infof("connecting to cluster at '%s'", cleanConnStr)
@@ -89,7 +92,7 @@ func (exporter *Exporter) Export() error {
 	defer func(path string) {
 		err := os.RemoveAll(path)
 		if err != nil {
-			logrus.Debugf("failed to remove temp directory: %w", err)
+			logrus.WithError(err).Debug("failed to remove temp directory")
 		}
 	}(tempDir)
 
@@ -97,6 +100,21 @@ func (exporter *Exporter) Export() error {
 	clusterVersion, err := exporter.clusterVersion()
 	if err != nil {
 		return fmt.Errorf("failed to get cluster version: %w", err)
+	}
+
+	clusterId, err := exporter.clusterId()
+	if err != nil {
+		return fmt.Errorf("failed to get cluster id: %w", err)
+	}
+
+	clusterName, err := exporter.clusterName()
+	if err != nil {
+		return fmt.Errorf("failed to get cluster name: %w", err)
+	}
+
+	organization, err := exporter.organization()
+	if err != nil {
+		return fmt.Errorf("failed to get organization: %w", err)
 	}
 
 	agg, err := exporter.sqlStatsAggregationInterval()
@@ -118,6 +136,9 @@ func (exporter *Exporter) Export() error {
 			TimeRange:        exporter.Config.TimeRange,
 		},
 		ClusterVersion:              clusterVersion,
+		ClusterId:                   clusterId,
+		ClusterName:                 clusterName,
+		Organization:                organization,
 		SqlStatsAggregationInterval: agg,
 		SqlStatsFlushInterval:       flush,
 	}
@@ -181,6 +202,30 @@ func (exporter *Exporter) clusterVersion() (string, error) {
 
 }
 
+func (exporter *Exporter) clusterId() (string, error) {
+	r := exporter.Db.QueryRow(context.Background(), "SELECT crdb_internal.cluster_id()")
+	var clusterId string
+	err := r.Scan(&clusterId)
+	return clusterId, err
+
+}
+
+func (exporter *Exporter) clusterName() (string, error) {
+	r := exporter.Db.QueryRow(context.Background(), "SELECT crdb_internal.cluster_name()")
+	var name string
+	err := r.Scan(&name)
+	return name, err
+
+}
+
+func (exporter *Exporter) organization() (string, error) {
+	r := exporter.Db.QueryRow(context.Background(), "SHOW CLUSTER SETTING cluster.organization")
+	var organization string
+	err := r.Scan(&organization)
+	return organization, err
+
+}
+
 // sql.stats.aggregation.interval
 // sql.stats.flush.interval
 func (exporter *Exporter) sqlStatsAggregationInterval() (time.Duration, error) {
@@ -211,23 +256,12 @@ func (exporter *Exporter) exportAllZoneConfigurations(ctx context.Context, tempD
 
 	dataFile := filepath.Join(tempDir, "zone_configurations.txt")
 
-	// Create output file
-	file, err := os.Create(dataFile)
-	if err != nil {
-		return err
-	}
-	defer func(file *os.File) {
-		err := file.Close()
-		if err != nil {
-			logrus.Errorf("failed to close file: %s", err)
-		}
-	}(file)
-
 	rows, err := exporter.Db.Query(ctx, "with z AS (SHOW ALL ZONE CONFIGURATIONS) SELECT raw_config_sql FROM z WHERE raw_config_sql IS NOT NULL")
 
 	if err != nil {
 		return fmt.Errorf("failed to query z configurations: %w", err)
 	}
+	defer rows.Close()
 
 	var configs []string
 	for rows.Next() {
@@ -252,18 +286,6 @@ func (exporter *Exporter) exportCreateStatements(ctx context.Context, db string,
 	filename := fmt.Sprintf("%s.schema.txt", db)
 	dataFile := filepath.Join(tempDir, filename)
 
-	// Create output file
-	file, err := os.Create(dataFile)
-	if err != nil {
-		return err
-	}
-	defer func(file *os.File) {
-		err := file.Close()
-		if err != nil {
-			logrus.Errorf("failed to close file: %s", err)
-		}
-	}(file)
-
 	creates, err := exporter.createStatements(db)
 	if err != nil {
 		return err
@@ -281,7 +303,7 @@ func (exporter *Exporter) createStatements(db string) ([]string, error) {
 
 	var creates []string
 
-	_, err := exporter.Db.Exec(context.Background(), fmt.Sprintf("USE \"%s\"", db))
+	_, err := exporter.Db.Exec(context.Background(), fmt.Sprintf("USE %s", pgx.Identifier{db}.Sanitize()))
 	if err != nil {
 		return creates, err
 	}
@@ -291,6 +313,7 @@ func (exporter *Exporter) createStatements(db string) ([]string, error) {
 	if err != nil {
 		return creates, err
 	}
+	defer rows.Close()
 
 	for rows.Next() {
 		var create string
@@ -313,6 +336,7 @@ func (exporter *Exporter) userDatabases() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 
 	var db string
 	for rows.Next() {
@@ -339,12 +363,15 @@ func (exporter *Exporter) exportTable(ctx context.Context, dir string, table Tab
 	defer func(file *os.File) {
 		err := file.Close()
 		if err != nil {
-			logrus.Errorf("failed to close file: %w", err)
+			logrus.WithError(err).Debug("failed to close file")
 		}
 	}(file)
 
 	// Get column names
-	rows, err := exporter.Db.Query(ctx, fmt.Sprintf("SELECT * FROM %s.%s LIMIT 0", table.Database, table.Name))
+	rows, err := exporter.Db.Query(ctx,
+		fmt.Sprintf("SELECT * FROM %s.%s LIMIT 0", pgx.Identifier{table.Database}.Sanitize(),
+
+			pgx.Identifier{table.Name}.Sanitize()))
 	if err != nil {
 		return err
 	}
@@ -367,12 +394,14 @@ func (exporter *Exporter) exportTable(ctx context.Context, dir string, table Tab
 	var where string
 	if table.TimeColumn != "" {
 		where = fmt.Sprintf("WHERE %s BETWEEN '%s' and '%s'",
-			table.TimeColumn,
+			pgx.Identifier{table.TimeColumn}.Sanitize(),
 			startTime(exporter.Config.TimeRange.Start).Format("2006-01-02 15:04:05"), // offset for aggregation interval -- TODO
 			endTime(exporter.Config.TimeRange.End).Format("2006-01-02 15:04:05"),
 		)
 	}
-	copyQuery := fmt.Sprintf("COPY (SELECT * FROM %s.%s %s) TO STDOUT WITH CSV", table.Database, table.Name, where)
+	copyQuery := fmt.Sprintf(
+		"COPY (SELECT * FROM %s.%s %s) TO STDOUT WITH CSV",
+		pgx.Identifier{table.Database}.Sanitize(), pgx.Identifier{table.Name}.Sanitize(), where)
 	logrus.Info(copyQuery)
 	_, err = exporter.Db.PgConn().CopyTo(ctx, file, copyQuery)
 	if err != nil {
@@ -390,7 +419,7 @@ func (exporter *Exporter) createZipFile(sourceDir string) error {
 	defer func(zipFile *os.File) {
 		err := zipFile.Close()
 		if err != nil {
-			logrus.Debugf("failed to close zip file: %w", err)
+			logrus.WithError(err).Debug("failed to close zip file")
 		}
 	}(zipFile)
 
@@ -398,7 +427,7 @@ func (exporter *Exporter) createZipFile(sourceDir string) error {
 	defer func(zipWriter *zip.Writer) {
 		err := zipWriter.Close()
 		if err != nil {
-			logrus.Debugf("failed to close zip writer: %w", err)
+			logrus.WithError(err).Debug("failed to close zip writer")
 		}
 	}(zipWriter)
 
@@ -416,7 +445,7 @@ func (exporter *Exporter) createZipFile(sourceDir string) error {
 			return err
 		}
 
-		zipFile, err := zipWriter.Create(relPath)
+		zf, err := zipWriter.Create(relPath)
 		if err != nil {
 			return err
 		}
@@ -428,11 +457,11 @@ func (exporter *Exporter) createZipFile(sourceDir string) error {
 		defer func(file *os.File) {
 			err := file.Close()
 			if err != nil {
-				logrus.Debugf("failed to close zip file: %w", err)
+				logrus.WithError(err).Debug("failed to close zip file")
 			}
 		}(file)
 
-		_, err = io.Copy(zipFile, file)
+		_, err = io.Copy(zf, file)
 		return err
 	})
 
@@ -448,13 +477,6 @@ func endTime(t time.Time) time.Time {
 }
 
 func cleanConnectionString(connStr string) (string, error) {
-	/*
-		if !strings.HasPrefix(connStr, "postgresql://") {
-			return "", fmt.Errorf("invalid connection string: must start with postgresql://")
-		}
-
-	*/
-
 	// Parse the connection string as a URL
 	u, err := url.Parse(connStr)
 	if err != nil {
