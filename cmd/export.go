@@ -37,6 +37,7 @@ var exportCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		defer exporter.Close()
 
 		err = exporter.Export()
 

@@ -138,6 +138,88 @@ go mod tidy
 go build -o workload-exporter
 ```
 
+## Using as a Go Library
+
+You can import and use workload-exporter in your Go projects as a library.
+
+### Installation
+
+```bash
+go get github.com/cockroachlabs/workload-exporter@latest
+```
+
+Or specify a version:
+
+```bash
+go get github.com/cockroachlabs/workload-exporter@v1.4.0
+```
+
+### Example Usage
+
+```go
+package main
+
+import (
+    "log"
+    "time"
+
+    "github.com/cockroachlabs/workload-exporter/pkg/export"
+)
+
+func main() {
+    // Create exporter configuration
+    config := export.Config{
+        ConnectionString: "postgresql://user:password@host:26257/?sslmode=verify-full",
+        OutputFile:       "my-export.zip",
+        TimeRange: export.TimeRange{
+            Start: time.Now().Add(-6 * time.Hour),
+            End:   time.Now(),
+        },
+    }
+
+    // Initialize exporter
+    exporter, err := export.NewExporter(config)
+    if err != nil {
+        log.Fatalf("Failed to create exporter: %v", err)
+    }
+    defer exporter.Close()
+
+    // Perform export
+    if err := exporter.Export(); err != nil {
+        log.Fatalf("Export failed: %v", err)
+    }
+
+    log.Println("Export completed successfully")
+}
+```
+
+### API Documentation
+
+The main types and functions are:
+
+- **`export.Config`**: Configuration for the export operation
+  - `ConnectionString`: PostgreSQL connection URL for CockroachDB
+  - `OutputFile`: Path to output zip file
+  - `TimeRange`: Time window for filtering statistics data
+
+- **`export.TimeRange`**: Defines the time window
+  - `Start`: Beginning of time range (inclusive)
+  - `End`: End of time range (inclusive)
+
+- **`export.NewExporter(config Config)`**: Creates a new exporter instance
+  - Returns `(*Exporter, error)`
+  - Establishes database connection
+
+- **`exporter.Export()`**: Performs the complete export operation
+  - Returns `error` if any step fails
+  - Creates zip file at the configured `OutputFile` path
+
+- **`exporter.Close()`**: Closes the database connection
+  - Should be called when done (typically with `defer`)
+  - Returns `error`
+
+For full API documentation, see [pkg.go.dev](https://pkg.go.dev/github.com/cockroachlabs/workload-exporter/pkg/export).
+
 ## Troubleshooting
 
 ### Connection Issues

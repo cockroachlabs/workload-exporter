@@ -16,27 +16,43 @@ import (
 	"time"
 )
 
+// ExporterVersion is the current version of the exporter tool.
 const ExporterVersion = "1.0.0"
 
 var systemDatabases = []string{"system", "crdb_internal", "postgres"}
 
+// Exporter handles the export of workload data from a CockroachDB cluster.
+// It manages database connections and coordinates the export of statistics,
+// schemas, and configurations into a zip file.
 type Exporter struct {
-	Config                Config
-	Db                    *pgx.Conn
+	// Config contains the export configuration settings
+	Config Config
+	// Db is the active database connection to the CockroachDB cluster
+	Db *pgx.Conn
+	// CleanConnectionString is the connection string with password redacted
 	CleanConnectionString string
 }
 
+// Config defines the configuration for a workload export operation.
 type Config struct {
+	// ConnectionString is the PostgreSQL connection URL for the CockroachDB cluster
 	ConnectionString string
-	OutputFile       string
-	TimeRange        TimeRange
+	// OutputFile is the path to the output zip file (default: "workload-export.zip")
+	OutputFile string
+	// TimeRange specifies the time window for filtering exported statistics
+	TimeRange TimeRange
 }
 
+// TimeRange defines a time window for filtering exported data.
 type TimeRange struct {
+	// Start is the beginning of the time range (inclusive)
 	Start time.Time
-	End   time.Time
+	// End is the end of the time range (inclusive)
+	End time.Time
 }
 
+// Metadata contains information about the exported data and cluster configuration.
+// This is serialized to metadata.json in the export zip file.
 type Metadata struct {
 	Version                     string        `json:"version"`
 	Timestamp                   time.Time     `json:"timestamp"`
@@ -49,9 +65,13 @@ type Metadata struct {
 	SqlStatsFlushInterval       time.Duration `json:"sql.stats.flush.interval"`
 }
 
+// Table represents a CockroachDB table to be exported with optional time-based filtering.
 type Table struct {
-	Database   string
-	Name       string
+	// Database is the name of the database containing the table
+	Database string
+	// Name is the table name
+	Name string
+	// TimeColumn is the column name used for time-based filtering (empty if not applicable)
 	TimeColumn string
 }
 
@@ -62,6 +82,27 @@ var exportTables = []Table{
 	Table{Database: "crdb_internal", Name: "gossip_nodes", TimeColumn: ""},
 }
 
+// NewExporter creates a new Exporter instance with the given configuration.
+// It establishes a database connection to the CockroachDB cluster and prepares for data export.
+// The connection string password is redacted in CleanConnectionString for logging purposes.
+//
+// Returns an error if the connection fails or the connection string is invalid.
+//
+// Example:
+//
+//	config := export.Config{
+//	    ConnectionString: "postgresql://user:password@host:26257/?sslmode=verify-full",
+//	    OutputFile:       "export.zip",
+//	    TimeRange: export.TimeRange{
+//	        Start: time.Now().Add(-6 * time.Hour),
+//	        End:   time.Now(),
+//	    },
+//	}
+//	exporter, err := export.NewExporter(config)
+//	if err != nil {
+//	    return err
+//	}
+//	defer exporter.Close()
 func NewExporter(config Config) (*Exporter, error) {
 	ctx := context.Background()
 	cleanConnStr, err := cleanConnectionString(config.ConnectionString)
@@ -78,6 +119,34 @@ func NewExporter(config Config) (*Exporter, error) {
 	return &exporter, nil
 }
 
+// Close closes the database connection.
+// It should be called when the Exporter is no longer needed, typically using defer.
+//
+// Example:
+//
+//	exporter, err := export.NewExporter(config)
+//	if err != nil {
+//	    return err
+//	}
+//	defer exporter.Close()
+func (exporter *Exporter) Close() error {
+	if exporter.Db != nil {
+		return exporter.Db.Close(context.Background())
+	}
+	return nil
+}
+
+// Export performs the complete workload export operation.
+// It exports the following data into a zip file:
+//   - Cluster metadata (version, ID, name, organization, settings)
+//   - Database schemas (CREATE statements for all user databases)
+//   - Zone configurations
+//   - Statistics tables (statement_statistics, transaction_statistics, transaction_contention_events, gossip_nodes)
+//
+// The statistics tables are filtered by the TimeRange specified in Config.
+// All exported data is written to the OutputFile specified in Config.
+//
+// Returns an error if any step of the export process fails.
 func (exporter *Exporter) Export() error {
 
 	logrus.Info("starting export")

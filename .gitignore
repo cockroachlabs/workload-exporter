@@ -65,3 +65,4 @@ tmp/
 workload-export.go
 workload-export.zip
 workload-export/
+workload-exporter
