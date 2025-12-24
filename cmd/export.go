@@ -1,3 +1,4 @@
+// Package cmd implements the CLI commands for the workload-exporter tool.
 package cmd
 
 import (
@@ -37,7 +38,7 @@ var exportCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer exporter.Close()
+		defer exporter.Close() //nolint:errcheck // Error from Close in defer is intentionally ignored
 
 		err = exporter.Export()
 

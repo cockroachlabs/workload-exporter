@@ -1,3 +1,5 @@
+// Package export provides functionality for exporting workload data from CockroachDB clusters.
+// It exports statistics, schemas, and configurations into a portable zip file format.
 package export
 
 import (

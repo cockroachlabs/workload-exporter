@@ -1,5 +1,7 @@
 # CockroachDB Workload Export Tool
 
+[![CI](https://github.com/cockroachlabs/workload-exporter/actions/workflows/ci.yaml/badge.svg)](https://github.com/cockroachlabs/workload-exporter/actions/workflows/ci.yaml)
+
 A command-line utility for exporting workload data from a CockroachDB cluster into a portable zip file for analysis.
 
 ## Purpose
