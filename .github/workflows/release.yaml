@@ -15,69 +15,148 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all history for changelog generation
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.22' # You can adjust this to your Go version
+          go-version: '1.23'
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
 
       - name: Get tag version
         id: get_version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
-      - name: Get dependencies
-        run: go mod tidy
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Run tests
+        run: go test -v -race ./...
+
+      - name: Run linting
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.7.2
+          args: --timeout=5m
 
       - name: Build binaries
+        env:
+          VERSION: ${{ steps.get_version.outputs.VERSION }}
+          COMMIT: ${{ github.sha }}
         run: |
           mkdir -p release
-          
+
+          # Build flags for version info
+          LDFLAGS="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT:0:8} -X main.BuildDate=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
           # Build for Linux
-          GOOS=linux GOARCH=amd64 go build -o release/workload-exporter-${{ steps.get_version.outputs.VERSION }}-linux-amd64 ./
-          GOOS=linux GOARCH=arm64 go build -o release/workload-exporter-${{ steps.get_version.outputs.VERSION }}-linux-arm64 ./
-          
+          echo "Building for Linux amd64..."
+          GOOS=linux GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o release/workload-exporter-${VERSION}-linux-amd64 ./
+          echo "Building for Linux arm64..."
+          GOOS=linux GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o release/workload-exporter-${VERSION}-linux-arm64 ./
+
           # Build for macOS
-          GOOS=darwin GOARCH=amd64 go build -o release/workload-exporter-${{ steps.get_version.outputs.VERSION }}-darwin-amd64 ./
-          GOOS=darwin GOARCH=arm64 go build -o release/workload-exporter-${{ steps.get_version.outputs.VERSION }}-darwin-arm64 ./
-          
+          echo "Building for macOS amd64..."
+          GOOS=darwin GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o release/workload-exporter-${VERSION}-darwin-amd64 ./
+          echo "Building for macOS arm64..."
+          GOOS=darwin GOARCH=arm64 go build -ldflags="${LDFLAGS}" -o release/workload-exporter-${VERSION}-darwin-arm64 ./
+
           # Build for Windows
-          GOOS=windows GOARCH=amd64 go build -o release/workload-exporter-${{ steps.get_version.outputs.VERSION }}-windows-amd64.exe ./
-          GOOS=windows GOARCH=386 go build -o release/workload-exporter-${{ steps.get_version.outputs.VERSION }}-windows-386.exe ./
+          echo "Building for Windows amd64..."
+          GOOS=windows GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o release/workload-exporter-${VERSION}-windows-amd64.exe ./
+          echo "Building for Windows 386..."
+          GOOS=windows GOARCH=386 go build -ldflags="${LDFLAGS}" -o release/workload-exporter-${VERSION}-windows-386.exe ./
 
       - name: Create checksums
+        working-directory: release
         run: |
-          cd release
-          for file in *; do
-            sha256sum "$file" > "${file}.sha256"
-          done
-          cd ..
+          sha256sum * > checksums.txt
+          cat checksums.txt
 
       - name: Package binaries
+        env:
+          VERSION: ${{ steps.get_version.outputs.VERSION }}
+        working-directory: release
         run: |
-          cd release
-          
           # Linux
-          tar czf workload-exporter-${{ steps.get_version.outputs.VERSION }}-linux-amd64.tar.gz workload-exporter-${{ steps.get_version.outputs.VERSION }}-linux-amd64 workload-exporter-${{ steps.get_version.outputs.VERSION }}-linux-amd64.sha256
-          tar czf workload-exporter-${{ steps.get_version.outputs.VERSION }}-linux-arm64.tar.gz workload-exporter-${{ steps.get_version.outputs.VERSION }}-linux-arm64 workload-exporter-${{ steps.get_version.outputs.VERSION }}-linux-arm64.sha256
-          
+          tar czf workload-exporter-${VERSION}-linux-amd64.tar.gz workload-exporter-${VERSION}-linux-amd64
+          tar czf workload-exporter-${VERSION}-linux-arm64.tar.gz workload-exporter-${VERSION}-linux-arm64
+
           # macOS
-          tar czf workload-exporter-${{ steps.get_version.outputs.VERSION }}-darwin-amd64.tar.gz workload-exporter-${{ steps.get_version.outputs.VERSION }}-darwin-amd64 workload-exporter-${{ steps.get_version.outputs.VERSION }}-darwin-amd64.sha256
-          tar czf workload-exporter-${{ steps.get_version.outputs.VERSION }}-darwin-arm64.tar.gz workload-exporter-${{ steps.get_version.outputs.VERSION }}-darwin-arm64 workload-exporter-${{ steps.get_version.outputs.VERSION }}-darwin-arm64.sha256
-          
+          tar czf workload-exporter-${VERSION}-darwin-amd64.tar.gz workload-exporter-${VERSION}-darwin-amd64
+          tar czf workload-exporter-${VERSION}-darwin-arm64.tar.gz workload-exporter-${VERSION}-darwin-arm64
+
           # Windows
-          zip workload-exporter-${{ steps.get_version.outputs.VERSION }}-windows-amd64.zip workload-exporter-${{ steps.get_version.outputs.VERSION }}-windows-amd64.exe workload-exporter-${{ steps.get_version.outputs.VERSION }}-windows-amd64.exe.sha256
-          zip workload-exporter-${{ steps.get_version.outputs.VERSION }}-windows-386.zip workload-exporter-${{ steps.get_version.outputs.VERSION }}-windows-386.exe workload-exporter-${{ steps.get_version.outputs.VERSION }}-windows-386.exe.sha256
-          
-          cd ..
+          zip workload-exporter-${VERSION}-windows-amd64.zip workload-exporter-${VERSION}-windows-amd64.exe
+          zip workload-exporter-${VERSION}-windows-386.zip workload-exporter-${VERSION}-windows-386.exe
+
+          # Clean up raw binaries (keep only archives)
+          rm -f workload-exporter-${VERSION}-*-amd64 workload-exporter-${VERSION}-*-arm64
+          rm -f workload-exporter-${VERSION}-*.exe
+
+          # Update checksums with only archives
+          sha256sum *.tar.gz *.zip > checksums.txt
+          cat checksums.txt
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get previous tag
+          PREV_TAG=$(git describe --abbrev=0 --tags $(git rev-list --tags --skip=1 --max-count=1) 2>/dev/null || echo "")
+
+          if [ -z "$PREV_TAG" ]; then
+            echo "First release"
+            CHANGELOG="Initial release of workload-exporter"
+          else
+            echo "Generating changelog from ${PREV_TAG} to ${{ steps.get_version.outputs.VERSION }}"
+            CHANGELOG=$(git log ${PREV_TAG}..${{ steps.get_version.outputs.VERSION }} --pretty=format:"- %s (%h)" --no-merges)
+          fi
+
+          # Save to file and output
+          echo "${CHANGELOG}" > CHANGELOG.md
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "${CHANGELOG}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           name: Release ${{ steps.get_version.outputs.VERSION }}
+          body: |
+            ## What's Changed
+
+            ${{ steps.changelog.outputs.changelog }}
+
+            ## Installation
+
+            Download the appropriate binary for your platform from the assets below.
+
+            ### Verify checksums
+            ```bash
+            sha256sum -c checksums.txt
+            ```
+
+            ## Full Changelog
+
+            See all commits: https://github.com/${{ github.repository }}/compare/${{ steps.get_version.outputs.VERSION }}...main
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(steps.get_version.outputs.VERSION, '-rc') || contains(steps.get_version.outputs.VERSION, '-beta') || contains(steps.get_version.outputs.VERSION, '-alpha') }}
           files: |
             release/*.tar.gz
             release/*.zip
+            release/checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
