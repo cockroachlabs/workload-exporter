@@ -1,5 +1,3 @@
-version: "2"
-
 run:
   timeout: 5m
 
@@ -12,15 +10,13 @@ linters:
     - unused
     - misspell
 
-linters-settings:
-  errcheck:
-    check-blank: false
-    ignore: Close
-
 issues:
   exclude-rules:
     # Exclude all linters from test files
     - path: _test\.go
       linters:
         - errcheck
-        - gosec
+
+  exclude:
+    # Ignore Close errors in defer statements
+    - "Error return value of.*Close.*is not checked"
