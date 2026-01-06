@@ -96,7 +96,7 @@ var exportTables = []Table{
 //	    ConnectionString: "postgresql://user:password@host:26257/?sslmode=verify-full",
 //	    OutputFile:       "export.zip",
 //	    TimeRange: export.TimeRange{
-//	        Start: time.Now().Add(-6 * time.Hour),
+//	        Start: time.Now().Add(-2 * time.Hour),
 //	        End:   time.Now(),
 //	    },
 //	}

@@ -54,7 +54,7 @@ workload-exporter export \
 
 - `--connection-url`, `-c`: Connection string for CockroachDB (required)
 - `--output-file`, `-o`: Output zip file name (default: "workload-export.zip")
-- `--start`, `-s`: Start time in RFC3339 format (default: current time - 6 hours)
+- `--start`, `-s`: Start time in RFC3339 format (default: current time - 2 hours)
 - `--end`, `-e`: End time in RFC3339 format (default: current time + 1 hour)
 - `--debug`: Enable debug logging output
 
@@ -174,7 +174,7 @@ func main() {
         ConnectionString: "postgresql://user:password@host:26257/?sslmode=verify-full",
         OutputFile:       "my-export.zip",
         TimeRange: export.TimeRange{
-            Start: time.Now().Add(-6 * time.Hour),
+            Start: time.Now().Add(-2 * time.Hour),
             End:   time.Now(),
         },
     }

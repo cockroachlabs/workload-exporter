@@ -60,7 +60,7 @@ func init() {
 }
 
 func defaultStartFlag() string {
-	return time.Now().UTC().Add(-6 * time.Hour).Format(time.RFC3339)
+	return time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
 }
 
 func defaultEndFlag() string {
