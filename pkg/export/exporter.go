@@ -123,7 +123,9 @@ func NewExporter(config Config) (*Exporter, error) {
 	// Starting in v26.1, the allow_unsafe_internals setting defaults to false
 	// and must be explicitly enabled to access crdb_internal tables
 	if err := enableUnsafeInternalsIfNeeded(ctx, conn); err != nil {
-		conn.Close(ctx)
+		if closeErr := conn.Close(ctx); closeErr != nil {
+			logrus.WithError(closeErr).Debug("failed to close connection after configuration error")
+		}
 		return nil, fmt.Errorf("failed to configure database access: %w", err)
 	}
 
