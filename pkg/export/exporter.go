@@ -82,6 +82,7 @@ var exportTables = []Table{
 	Table{Database: "crdb_internal", Name: "transaction_statistics", TimeColumn: "aggregated_ts"},
 	Table{Database: "crdb_internal", Name: "transaction_contention_events", TimeColumn: "collection_ts"},
 	Table{Database: "crdb_internal", Name: "gossip_nodes", TimeColumn: ""},
+	Table{Database: "crdb_internal", Name: "table_indexes", TimeColumn: ""},
 }
 
 // NewExporter creates a new Exporter instance with the given configuration.
@@ -117,6 +118,15 @@ func NewExporter(config Config) (*Exporter, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Enable access to crdb_internal for CockroachDB 26.1+
+	// Starting in v26.1, the allow_unsafe_internals setting defaults to false
+	// and must be explicitly enabled to access crdb_internal tables
+	if err := enableUnsafeInternalsIfNeeded(ctx, conn); err != nil {
+		conn.Close(ctx)
+		return nil, fmt.Errorf("failed to configure database access: %w", err)
+	}
+
 	exporter := Exporter{Config: config, Db: conn, CleanConnectionString: cleanConnStr}
 	return &exporter, nil
 }
@@ -143,7 +153,7 @@ func (exporter *Exporter) Close() error {
 //   - Cluster metadata (version, ID, name, organization, settings)
 //   - Database schemas (CREATE statements for all user databases)
 //   - Zone configurations
-//   - Statistics tables (statement_statistics, transaction_statistics, transaction_contention_events, gossip_nodes)
+//   - Statistics tables (statement_statistics, transaction_statistics, transaction_contention_events, gossip_nodes, table_indexes)
 //
 // The statistics tables are filtered by the TimeRange specified in Config.
 // All exported data is written to the OutputFile specified in Config.
@@ -561,4 +571,61 @@ func cleanConnectionString(connStr string) (string, error) {
 	}
 
 	return u.String(), nil
+}
+
+// enableUnsafeInternalsIfNeeded checks the CockroachDB version and enables
+// allow_unsafe_internals if the version is >= 26.1.
+// This is required for accessing crdb_internal tables in CockroachDB 26.1+.
+func enableUnsafeInternalsIfNeeded(ctx context.Context, conn *pgx.Conn) error {
+	// Get the version string
+	var versionStr string
+	err := conn.QueryRow(ctx, "SELECT version()").Scan(&versionStr)
+	if err != nil {
+		return fmt.Errorf("failed to query version: %w", err)
+	}
+
+	// Parse the version to extract major version number
+	// Version string format: "CockroachDB CCL v26.1.0-beta.3 ..."
+	majorVersion, err := parseMajorVersion(versionStr)
+	if err != nil {
+		logrus.WithError(err).Warn("unable to parse CockroachDB version, skipping allow_unsafe_internals check")
+		return nil // Don't fail, just skip the check
+	}
+
+	// Enable allow_unsafe_internals for versions >= 26
+	if majorVersion >= 26 {
+		logrus.Infof("detected CockroachDB v%d.x, enabling allow_unsafe_internals", majorVersion)
+		_, err := conn.Exec(ctx, "SET allow_unsafe_internals = true")
+		if err != nil {
+			return fmt.Errorf("failed to set allow_unsafe_internals: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// parseMajorVersion extracts the major version number from a CockroachDB version string.
+// Example: "CockroachDB CCL v26.1.0-beta.3 ..." -> 26
+func parseMajorVersion(versionStr string) (int, error) {
+	// Look for pattern like "v26.1" or "v25.2"
+	// Version string format: "CockroachDB CCL v26.1.0-beta.3 ..."
+	parts := strings.Fields(versionStr)
+	for _, part := range parts {
+		if strings.HasPrefix(part, "v") {
+			// Remove the 'v' prefix
+			versionPart := strings.TrimPrefix(part, "v")
+			// Split by '.' to get major.minor.patch
+			versionComponents := strings.Split(versionPart, ".")
+			if len(versionComponents) > 0 {
+				// Parse the major version
+				var major int
+				_, err := fmt.Sscanf(versionComponents[0], "%d", &major)
+				if err != nil {
+					return 0, fmt.Errorf("failed to parse major version from %s: %w", versionComponents[0], err)
+				}
+				return major, nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("version number not found in string: %s", versionStr)
 }

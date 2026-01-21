@@ -2,249 +2,239 @@
 
 [![CI](https://github.com/cockroachlabs/workload-exporter/actions/workflows/ci.yaml/badge.svg)](https://github.com/cockroachlabs/workload-exporter/actions/workflows/ci.yaml)
 
-A command-line utility for exporting workload data from a CockroachDB cluster into a portable zip file for analysis.
+A command-line tool that exports workload data from a CockroachDB cluster into a portable zip file for analysis and troubleshooting.
 
-## Purpose
+## What It Does
 
-This tool simplifies the process of exporting workload data for analysis, including:
+The workload-exporter creates a complete snapshot of your cluster's workload characteristics, including:
 
-1. Statement and transaction statistics
-2. Contention events
-3. Cluster metadata, including node topology and configuration
-4. Table schemas
-5. Zone configurations
-6. System settings
+- **Statement and transaction statistics** - Query performance and execution patterns
+- **Contention events** - Lock contention and blocking queries
+- **Cluster metadata** - Version, configuration, and node topology
+- **Database schemas** - Table structures and definitions
+- **Zone configurations** - Replication and placement settings
+- **Table indexes** - Index definitions and descriptor IDs
 
-## Prerequisites
-
-- CockroachDB cluster (v21.1 or later recommended)
-- Network access to the CockroachDB cluster
-- User with appropriate read permissions on system tables
+This data can be analyzed locally or shared with Cockroach Labs support for troubleshooting.
 
 ## Installation
 
-### From Binary Releases
+### Download Pre-Built Binary (Recommended)
 
-Download the appropriate binary for your platform from the [releases page](https://github.com/cockroachlabs/workload-exporter/releases).
+Download the latest release for your platform from the [**Releases Page**](https://github.com/cockroachlabs/workload-exporter/releases).
 
-### From Source
-
+#### macOS
 ```bash
-# Clone the repository
-git clone https://github.com/cockroachlabs/workload-exporter.git
-cd workload-exporter
-
-# Build the binary
-go build -o workload-exporter
+# Download and make executable
+curl -L https://github.com/cockroachlabs/workload-exporter/releases/latest/download/workload-exporter-darwin-amd64 -o workload-exporter
+chmod +x workload-exporter
 ```
 
-## Usage
-
-### Export Command
-
-Export workload data from a CockroachDB cluster to a zip file:
-
+#### Linux
 ```bash
-workload-exporter export \
-  -c "postgresql://user:password@host:26257/database?sslmode=verify-full" \
-  [options]
+# Download and make executable
+curl -L https://github.com/cockroachlabs/workload-exporter/releases/latest/download/workload-exporter-linux-amd64 -o workload-exporter
+chmod +x workload-exporter
 ```
 
-#### Export Options:
+#### Windows
+Download `workload-exporter-windows-amd64.exe` from the [releases page](https://github.com/cockroachlabs/workload-exporter/releases).
 
-- `--connection-url`, `-c`: Connection string for CockroachDB (required)
-- `--output-file`, `-o`: Output zip file name (default: "workload-export.zip")
-- `--start`, `-s`: Start time in RFC3339 format (default: current time - 2 hours)
-- `--end`, `-e`: End time in RFC3339 format (default: current time + 1 hour)
-- `--debug`: Enable debug logging output
+### Verify Installation
 
-## Examples
+```bash
+./workload-exporter version
+```
+
+## Quick Start
 
 ### Basic Export
 
-Export workload data:
+Export the last 2 hours of workload data (default):
 
 ```bash
-# Export
-workload-exporter export -c "postgresql://user:password@source-host:26257/?sslmode=verify-full"
+./workload-exporter export \
+  -c "postgresql://user:password@host:26257/?sslmode=verify-full"
 ```
 
-### Specific time period
+This creates `workload-export.zip` in the current directory.
 
-Export for a specific time period:
+### Export Specific Time Range
+
+Export data for a specific time period:
 
 ```bash
-# Export a specific time window (times must be in RFC3339 format)
-workload-exporter export \
+./workload-exporter export \
   -c "postgresql://user:password@host:26257/?sslmode=verify-full" \
-  -s "2025-04-18T13:25:00Z" \
-  -e "2025-04-18T20:25:00Z"
+  -s "2025-04-18T13:00:00Z" \
+  -e "2025-04-18T20:00:00Z" \
+  -o "incident-export.zip"
 ```
 
-### Custom output file
+## Command Options
 
-Export using a custom file:
-
-```bash
-workload-exporter export \
-  -c "postgresql://user:password@host:26257/?sslmode=verify-full" \
-  -o "my-export.zip"
+```
+Flags:
+  -c, --connection-url string   CockroachDB connection string (required)
+  -o, --output-file string      Output zip file (default: "workload-export.zip")
+  -s, --start string            Start time in RFC3339 format (default: 2 hours ago)
+  -e, --end string              End time in RFC3339 format (default: 1 hour from now)
+      --debug                   Enable debug logging
 ```
 
-### Enable debug logging
+### Connection String Format
 
-Export with verbose debug output:
-
-```bash
-workload-exporter export \
-  -c "postgresql://user:password@host:26257/?sslmode=verify-full" \
-  --debug
+```
+postgresql://[user]:[password]@[host]:[port]/[database]?sslmode=[mode]
 ```
 
-## File Format
+**Example:**
+```
+postgresql://admin:mypassword@my-cluster.example.com:26257/defaultdb?sslmode=verify-full
+```
 
-The export zip file contains:
+## What Data is Collected
+
+The export creates a **zip file** containing the following files:
 
 ### Metadata
-- `metadata.json`: Export metadata including:
-  - Cluster version, ID, name, and organization
-  - SQL statistics aggregation and flush intervals
-  - Export configuration (connection string with password redacted, time range, output file)
-  - Timestamp of export
+- **`metadata.json`** - Cluster version, ID, name, organization, and export configuration
+  - ⚠️ Note: Connection string password is automatically redacted
 
-### Statistics Data (CSV format with headers)
-- `crdb_internal.statement_statistics.csv`: Statement execution statistics
-- `crdb_internal.transaction_statistics.csv`: Transaction execution statistics
-- `crdb_internal.transaction_contention_events.csv`: Lock contention events
-- `crdb_internal.gossip_nodes.csv`: Cluster node information
+### Statistics (CSV format, time-filtered)
+- **`crdb_internal.statement_statistics.csv`** - SQL statement execution stats
+- **`crdb_internal.transaction_statistics.csv`** - Transaction execution stats
+- **`crdb_internal.transaction_contention_events.csv`** - Lock contention events
+- **`crdb_internal.gossip_nodes.csv`** - Node information and topology
+- **`crdb_internal.table_indexes.csv`** - Table and index descriptor IDs
 
-**Note:** Statistics tables are filtered by the specified time range using their timestamp columns.
+*Statistics files only include data within the specified time range*
 
-### Database Schemas
-- `[database_name].schema.txt`: CREATE statements for all tables in each user database
-  - One file per database (excludes system databases: `system`, `crdb_internal`, `postgres`)
+### Schema Information
+- **`[database_name].schema.txt`** - CREATE statements for all tables in each database
+  - One file per user database (system databases excluded)
 
 ### Configuration
-- `zone_configurations.txt`: All zone configuration SQL statements from the cluster
+- **`zone_configurations.txt`** - All zone configuration SQL statements
 
-## Building from Source
+## Inspecting the Export
 
-Requirements:
-- Go 1.18 or later
-
-```bash
-# Get dependencies
-go mod tidy
-
-# Build
-go build -o workload-exporter
-```
-
-## Using as a Go Library
-
-You can import and use workload-exporter in your Go projects as a library.
-
-### Installation
+The export is a standard **zip file** that you can inspect before sharing:
 
 ```bash
-go get github.com/cockroachlabs/workload-exporter@latest
+# List all files in the export
+unzip -l workload-export.zip
+
+# Extract to a directory
+unzip workload-export.zip -d export-contents
+
+# View the metadata
+cat export-contents/metadata.json | jq .
+
+# Preview statistics (first 10 lines)
+head export-contents/crdb_internal.statement_statistics.csv
+
+# Check what schemas were exported
+ls export-contents/*.schema.txt
 ```
 
-Or specify a version:
+**All data is in plain text format** (JSON, CSV, SQL) and can be reviewed before sharing with Cockroach Labs or others.
+
+## Privacy and Security
+
+- **Passwords are redacted** - Connection string passwords are automatically removed from metadata
+- **No query parameters** - Statement statistics include query fingerprints, not actual parameter values
+- **Schema only** - Table schemas are exported, but **no actual table data** is included
+- **Read-only** - The tool only reads data and makes no modifications to your cluster
+- **Local export** - All data is written to a local zip file under your control
+
+## Requirements
+
+- **CockroachDB version:** 24.1 or later
+- **Network access** to the CockroachDB cluster
+- **User permissions:**
+  - Read access to `crdb_internal` tables
+  - Read access to system settings
+  - Read access to user databases (for schema export)
+  - *Recommended:* Admin role for simplest setup
+
+### Grant Permissions
+
+For simplest setup, grant admin role:
+```sql
+GRANT admin TO your_user;
+```
+
+For more restrictive permissions, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#permission-issues).
+
+## Common Use Cases
+
+### Troubleshooting Performance Issues
 
 ```bash
-go get github.com/cockroachlabs/workload-exporter@v1.4.0
+# Export data from when the issue occurred
+./workload-exporter export \
+  -c "connection-string" \
+  -s "2025-04-18T14:00:00Z" \
+  -e "2025-04-18T16:00:00Z" \
+  -o "performance-issue.zip"
 ```
 
-### Example Usage
+### Daily Workload Snapshot
 
-```go
-package main
-
-import (
-    "log"
-    "time"
-
-    "github.com/cockroachlabs/workload-exporter/pkg/export"
-)
-
-func main() {
-    // Create exporter configuration
-    config := export.Config{
-        ConnectionString: "postgresql://user:password@host:26257/?sslmode=verify-full",
-        OutputFile:       "my-export.zip",
-        TimeRange: export.TimeRange{
-            Start: time.Now().Add(-2 * time.Hour),
-            End:   time.Now(),
-        },
-    }
-
-    // Initialize exporter
-    exporter, err := export.NewExporter(config)
-    if err != nil {
-        log.Fatalf("Failed to create exporter: %v", err)
-    }
-    defer exporter.Close()
-
-    // Perform export
-    if err := exporter.Export(); err != nil {
-        log.Fatalf("Export failed: %v", err)
-    }
-
-    log.Println("Export completed successfully")
-}
-```
-
-### API Documentation
-
-The main types and functions are:
-
-- **`export.Config`**: Configuration for the export operation
-  - `ConnectionString`: PostgreSQL connection URL for CockroachDB
-  - `OutputFile`: Path to output zip file
-  - `TimeRange`: Time window for filtering statistics data
-
-- **`export.TimeRange`**: Defines the time window
-  - `Start`: Beginning of time range (inclusive)
-  - `End`: End of time range (inclusive)
-
-- **`export.NewExporter(config Config)`**: Creates a new exporter instance
-  - Returns `(*Exporter, error)`
-  - Establishes database connection
-
-- **`exporter.Export()`**: Performs the complete export operation
-  - Returns `error` if any step fails
-  - Creates zip file at the configured `OutputFile` path
-
-- **`exporter.Close()`**: Closes the database connection
-  - Should be called when done (typically with `defer`)
-  - Returns `error`
-
-For full API documentation, see [pkg.go.dev](https://pkg.go.dev/github.com/cockroachlabs/workload-exporter/pkg/export).
-
-## Troubleshooting
-
-### Connection Issues
-Ensure your connection string includes the proper SSL mode and authentication credentials:
 ```bash
-postgresql://user:password@host:26257/database?sslmode=verify-full
+# Export the last 24 hours
+./workload-exporter export \
+  -c "connection-string" \
+  -s "$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)" \
+  -e "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -o "daily-$(date +%Y%m%d).zip"
 ```
 
-### Time Format Errors
-Start and end times must be in RFC3339 format:
-- Correct: `2025-04-18T13:25:00Z`
-- Correct: `2025-04-18T13:25:00-05:00`
-- Incorrect: `2025-04-18 13:25:00`
+### Pre-Migration Baseline
 
-### Permission Errors
-The database user must have read access to:
-- `crdb_internal` tables
-- System settings (for cluster metadata)
-- All user databases (for schema export)
+```bash
+# Capture workload before a migration
+./workload-exporter export \
+  -c "connection-string" \
+  -o "pre-migration-baseline.zip"
+```
 
-### Empty Exports
-If the time range doesn't contain any data, the CSV files will only contain headers. Adjust your `--start` and `--end` flags to capture the desired time period.
+## Getting Help
+
+### Troubleshooting
+
+See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for solutions to common issues:
+- Connection problems
+- Permission errors
+- Time format issues
+- Empty exports
+
+### Enable Debug Logging
+
+For detailed information about what the tool is doing:
+
+```bash
+./workload-exporter export -c "connection-string" --debug
+```
+
+### Support
+
+- **Issues:** [GitHub Issues](https://github.com/cockroachlabs/workload-exporter/issues)
+- **Cockroach Labs Support:** Share the generated zip file with your support ticket
+
+## Additional Documentation
+
+- **[Version Compatibility](docs/COMPATIBILITY.md)** - Supported CockroachDB versions and version-specific behavior
+- **[Troubleshooting Guide](docs/TROUBLESHOOTING.md)** - Solutions to common issues
+- **[Development Guide](docs/DEVELOPMENT.md)** - Building from source and contributing
+- **[Library Usage](docs/LIBRARY.md)** - Using workload-exporter as a Go library
+- **[Testing Guide](docs/TESTING.md)** - Running tests and integration tests
 
 ## License
 
 [MIT License](LICENSE)
+
+---
+
+**Note:** This tool is designed for CockroachDB clusters. For CockroachDB 26.1+, the tool automatically handles the required `allow_unsafe_internals` setting.

@@ -184,3 +184,73 @@ func TestExportTables(t *testing.T) {
 		}
 	}
 }
+
+func TestParseMajorVersion(t *testing.T) {
+	tests := []struct {
+		name        string
+		versionStr  string
+		expected    int
+		expectError bool
+	}{
+		{
+			name:        "CockroachDB v26.1.0-beta.3",
+			versionStr:  "CockroachDB CCL v26.1.0-beta.3 (x86_64-apple-darwin19, built 2024/01/01 00:00:00, go1.21.5)",
+			expected:    26,
+			expectError: false,
+		},
+		{
+			name:        "CockroachDB v25.2.11",
+			versionStr:  "CockroachDB CCL v25.2.11 (x86_64-unknown-linux-gnu, built 2024/01/01 00:00:00, go1.21.5)",
+			expected:    25,
+			expectError: false,
+		},
+		{
+			name:        "CockroachDB v24.3.25",
+			versionStr:  "CockroachDB CCL v24.3.25 (x86_64-unknown-linux-gnu, built 2024/01/01 00:00:00, go1.21.5)",
+			expected:    24,
+			expectError: false,
+		},
+		{
+			name:        "CockroachDB v24.1.25",
+			versionStr:  "CockroachDB CCL v24.1.25 (x86_64-unknown-linux-gnu, built 2024/01/01 00:00:00, go1.21.5)",
+			expected:    24,
+			expectError: false,
+		},
+		{
+			name:        "Simple version",
+			versionStr:  "v26.1.0",
+			expected:    26,
+			expectError: false,
+		},
+		{
+			name:        "Invalid version string",
+			versionStr:  "PostgreSQL 14.0",
+			expected:    0,
+			expectError: true,
+		},
+		{
+			name:        "Empty string",
+			versionStr:  "",
+			expected:    0,
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			major, err := parseMajorVersion(tt.versionStr)
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error but got none")
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error: %v", err)
+				}
+				if major != tt.expected {
+					t.Errorf("parseMajorVersion() = %d, want %d", major, tt.expected)
+				}
+			}
+		})
+	}
+}
