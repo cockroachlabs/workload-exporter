@@ -6,10 +6,13 @@ package export
 import (
 	"archive/zip"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,17 +98,35 @@ func seedTestData(t *testing.T, conn *pgx.Conn) {
 	ctx := context.Background()
 
 	queries := []string{
-		// Create a test database
-		"CREATE DATABASE IF NOT EXISTS testdb",
-		// Create a test table
-		"CREATE TABLE IF NOT EXISTS testdb.test_table (id INT PRIMARY KEY, name STRING)",
+		// Create multiple test databases to verify cross-database table_indexes export
+		"CREATE DATABASE IF NOT EXISTS testdb1",
+		"CREATE DATABASE IF NOT EXISTS testdb2",
+		"CREATE DATABASE IF NOT EXISTS testdb3",
+
+		// Create tables in testdb1
+		"CREATE TABLE IF NOT EXISTS testdb1.users (id INT PRIMARY KEY, username STRING)",
+		"CREATE TABLE IF NOT EXISTS testdb1.orders (id INT PRIMARY KEY, user_id INT, total DECIMAL)",
+
+		// Create tables in testdb2
+		"CREATE TABLE IF NOT EXISTS testdb2.products (id INT PRIMARY KEY, name STRING, price DECIMAL)",
+		"CREATE TABLE IF NOT EXISTS testdb2.inventory (product_id INT PRIMARY KEY, quantity INT)",
+
+		// Create tables in testdb3
+		"CREATE TABLE IF NOT EXISTS testdb3.logs (id INT PRIMARY KEY, message STRING, created_at TIMESTAMP)",
+
 		// Insert some data
-		"INSERT INTO testdb.test_table VALUES (1, 'test1'), (2, 'test2')",
+		"INSERT INTO testdb1.users VALUES (1, 'alice'), (2, 'bob')",
+		"INSERT INTO testdb2.products VALUES (1, 'widget', 9.99), (2, 'gadget', 19.99)",
+		"INSERT INTO testdb3.logs VALUES (1, 'test log', now())",
+
 		// Run some queries to generate statistics
-		"SELECT * FROM testdb.test_table WHERE id = 1",
-		"SELECT * FROM testdb.test_table WHERE name = 'test2'",
-		// Create a zone configuration
-		"ALTER TABLE testdb.test_table CONFIGURE ZONE USING num_replicas = 1",
+		"SELECT * FROM testdb1.users WHERE id = 1",
+		"SELECT * FROM testdb2.products WHERE price > 10",
+		"SELECT * FROM testdb3.logs LIMIT 1",
+
+		// Create zone configurations
+		"ALTER TABLE testdb1.users CONFIGURE ZONE USING num_replicas = 1",
+		"ALTER TABLE testdb2.products CONFIGURE ZONE USING num_replicas = 1",
 	}
 
 	for _, query := range queries {
@@ -116,7 +137,7 @@ func seedTestData(t *testing.T, conn *pgx.Conn) {
 	// Wait a bit for statistics to be collected
 	time.Sleep(2 * time.Second)
 
-	t.Log("Test data seeded successfully")
+	t.Log("Test data seeded successfully with multiple databases")
 }
 
 // validateExport checks that the export file contains all expected content
@@ -142,7 +163,9 @@ func validateExport(t *testing.T, zipPath string, version string) {
 		"crdb_internal.gossip_nodes.csv":                  false,
 		"crdb_internal.table_indexes.csv":                 false,
 		"zone_configurations.txt":                         false,
-		"testdb.schema.txt":                               false, // Our test database
+		"testdb1.schema.txt":                              false, // Our test databases
+		"testdb2.schema.txt":                              false,
+		"testdb3.schema.txt":                              false,
 	}
 
 	// Check all files in zip
@@ -161,6 +184,11 @@ func validateExport(t *testing.T, zipPath string, version string) {
 		// Validate metadata.json structure
 		if file.Name == "metadata.json" {
 			validateMetadataFile(t, file, version)
+		}
+
+		// Validate table_indexes contains data from multiple databases
+		if file.Name == "crdb_internal.table_indexes.csv" {
+			validateTableIndexesFile(t, file, version)
 		}
 	}
 
@@ -206,4 +234,70 @@ func validateMetadataFile(t *testing.T, file *zip.File, version string) {
 	require.NotEmpty(t, metadata.ClusterId, "Metadata should have cluster ID")
 
 	t.Logf("  Cluster version from metadata: %s", metadata.ClusterVersion)
+}
+
+// validateTableIndexesFile ensures table_indexes CSV contains data from multiple databases
+func validateTableIndexesFile(t *testing.T, file *zip.File, version string) {
+	rc, err := file.Open()
+	require.NoError(t, err, "Should be able to open table_indexes CSV")
+	defer rc.Close()
+
+	// Parse CSV
+	reader := csv.NewReader(rc)
+
+	// Read header
+	header, err := reader.Read()
+	require.NoError(t, err, "Should be able to read CSV header")
+
+	// Find the descriptor_name column index (contains database.schema.table)
+	descriptorNameIdx := -1
+	for i, col := range header {
+		if col == "descriptor_name" {
+			descriptorNameIdx = i
+			break
+		}
+	}
+	require.NotEqual(t, -1, descriptorNameIdx, "CSV should have descriptor_name column")
+
+	// Track which databases we've seen
+	databasesSeen := make(map[string]bool)
+
+	// Read all rows and extract database names
+	for {
+		record, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		require.NoError(t, err, "Should be able to read CSV row")
+
+		if len(record) > descriptorNameIdx {
+			descriptorName := record[descriptorNameIdx]
+			// descriptor_name format is typically "database.schema.table" or "database.public.table"
+			parts := strings.Split(descriptorName, ".")
+			if len(parts) >= 1 {
+				database := parts[0]
+				// Track non-system databases
+				if database != "system" && database != "postgres" && database != "" {
+					databasesSeen[database] = true
+				}
+			}
+		}
+	}
+
+	// Verify we have entries from our test databases
+	expectedDatabases := []string{"testdb1", "testdb2", "testdb3"}
+	foundCount := 0
+	for _, db := range expectedDatabases {
+		if databasesSeen[db] {
+			foundCount++
+			t.Logf("  ✓ Found table indexes for database: %s", db)
+		}
+	}
+
+	// We should see at least 2 of our test databases to prove cross-database querying works
+	require.GreaterOrEqual(t, foundCount, 2,
+		"table_indexes CSV should contain entries from multiple test databases (found %d, expected at least 2)",
+		foundCount)
+
+	t.Logf("  ✓ table_indexes contains data from %d databases (version %s)", len(databasesSeen), version)
 }

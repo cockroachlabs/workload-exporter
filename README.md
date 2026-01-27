@@ -106,7 +106,7 @@ The export creates a **zip file** containing the following files:
 - **`crdb_internal.transaction_statistics.csv`** - Transaction execution stats
 - **`crdb_internal.transaction_contention_events.csv`** - Lock contention events
 - **`crdb_internal.gossip_nodes.csv`** - Node information and topology
-- **`crdb_internal.table_indexes.csv`** - Table and index descriptor IDs
+- **`crdb_internal.table_indexes.csv`** - Table and index descriptor IDs across all databases
 
 *Statistics files only include data within the specified time range*
 

@@ -176,9 +176,8 @@ func TestExportTables(t *testing.T) {
 	}
 
 	for i, table := range exportTables {
-		if table.Database == "" {
-			t.Errorf("exportTables[%d].Database should not be empty", i)
-		}
+		// Database can be empty for cross-database queries (e.g., "".crdb_internal.table_indexes)
+		// but Name must always be present
 		if table.Name == "" {
 			t.Errorf("exportTables[%d].Name should not be empty", i)
 		}

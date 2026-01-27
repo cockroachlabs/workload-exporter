@@ -82,7 +82,7 @@ var exportTables = []Table{
 	Table{Database: "crdb_internal", Name: "transaction_statistics", TimeColumn: "aggregated_ts"},
 	Table{Database: "crdb_internal", Name: "transaction_contention_events", TimeColumn: "collection_ts"},
 	Table{Database: "crdb_internal", Name: "gossip_nodes", TimeColumn: ""},
-	Table{Database: "crdb_internal", Name: "table_indexes", TimeColumn: ""},
+	Table{Database: "", Name: "crdb_internal.table_indexes", TimeColumn: ""}, // Use "" to query across all databases
 }
 
 // NewExporter creates a new Exporter instance with the given configuration.
@@ -155,7 +155,7 @@ func (exporter *Exporter) Close() error {
 //   - Cluster metadata (version, ID, name, organization, settings)
 //   - Database schemas (CREATE statements for all user databases)
 //   - Zone configurations
-//   - Statistics tables (statement_statistics, transaction_statistics, transaction_contention_events, gossip_nodes, table_indexes)
+//   - Statistics tables (statement_statistics, transaction_statistics, transaction_contention_events, gossip_nodes, table_indexes across all databases)
 //
 // The statistics tables are filtered by the TimeRange specified in Config.
 // All exported data is written to the OutputFile specified in Config.
@@ -435,7 +435,13 @@ func (exporter *Exporter) userDatabases() ([]string, error) {
 }
 
 func (exporter *Exporter) exportTable(ctx context.Context, dir string, table Table, aggregationInterval time.Duration) error {
-	filename := fmt.Sprintf("%s.%s.csv", table.Database, table.Name)
+	// Create filename - if database is empty, just use table name
+	var filename string
+	if table.Database == "" {
+		filename = fmt.Sprintf("%s.csv", table.Name)
+	} else {
+		filename = fmt.Sprintf("%s.%s.csv", table.Database, table.Name)
+	}
 	dataFile := filepath.Join(dir, filename)
 
 	// Create output file
@@ -451,10 +457,16 @@ func (exporter *Exporter) exportTable(ctx context.Context, dir string, table Tab
 	}(file)
 
 	// Get column names
-	rows, err := exporter.Db.Query(ctx,
-		fmt.Sprintf("SELECT * FROM %s.%s LIMIT 0", pgx.Identifier{table.Database}.Sanitize(),
+	// Construct table reference - handle empty database for cross-database queries
+	var tableRef string
+	if table.Database == "" {
+		// Empty database means query across all databases using "" prefix
+		tableRef = fmt.Sprintf(`"".%s`, table.Name)
+	} else {
+		tableRef = fmt.Sprintf("%s.%s", pgx.Identifier{table.Database}.Sanitize(), pgx.Identifier{table.Name}.Sanitize())
+	}
 
-			pgx.Identifier{table.Name}.Sanitize()))
+	rows, err := exporter.Db.Query(ctx, fmt.Sprintf("SELECT * FROM %s LIMIT 0", tableRef))
 	if err != nil {
 		return err
 	}
@@ -483,8 +495,8 @@ func (exporter *Exporter) exportTable(ctx context.Context, dir string, table Tab
 		)
 	}
 	copyQuery := fmt.Sprintf(
-		"COPY (SELECT * FROM %s.%s %s) TO STDOUT WITH CSV",
-		pgx.Identifier{table.Database}.Sanitize(), pgx.Identifier{table.Name}.Sanitize(), where)
+		"COPY (SELECT * FROM %s %s) TO STDOUT WITH CSV",
+		tableRef, where)
 	logrus.Info(copyQuery)
 	_, err = exporter.Db.PgConn().CopyTo(ctx, file, copyQuery)
 	if err != nil {
