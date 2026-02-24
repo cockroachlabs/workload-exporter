@@ -19,31 +19,55 @@ This data can be analyzed locally or shared with Cockroach Labs support for trou
 
 ## Installation
 
-### Download Pre-Built Binary (Recommended)
+### Download Pre-Built Binary
 
-Download the latest release for your platform from the [**Releases Page**](https://github.com/cockroachlabs/workload-exporter/releases).
+Download the latest release for your platform from the [**Releases Page**](https://github.com/cockroachlabs/workload-exporter/releases), or use the commands below (replace `VERSION` with the desired release tag, e.g. `v1.7.1`):
 
-#### macOS
+#### macOS (Apple Silicon)
 ```bash
-# Download and make executable
-curl -L https://github.com/cockroachlabs/workload-exporter/releases/latest/download/workload-exporter-darwin-amd64 -o workload-exporter
-chmod +x workload-exporter
+curl -L https://github.com/cockroachlabs/workload-exporter/releases/download/VERSION/workload-exporter-VERSION-darwin-arm64.tar.gz | tar xz
+mv workload-exporter-VERSION-darwin-arm64 workload-exporter
 ```
 
-#### Linux
+#### macOS (Intel)
 ```bash
-# Download and make executable
-curl -L https://github.com/cockroachlabs/workload-exporter/releases/latest/download/workload-exporter-linux-amd64 -o workload-exporter
-chmod +x workload-exporter
+curl -L https://github.com/cockroachlabs/workload-exporter/releases/download/VERSION/workload-exporter-VERSION-darwin-amd64.tar.gz | tar xz
+mv workload-exporter-VERSION-darwin-amd64 workload-exporter
+```
+
+#### Linux (amd64)
+```bash
+curl -L https://github.com/cockroachlabs/workload-exporter/releases/download/VERSION/workload-exporter-VERSION-linux-amd64.tar.gz | tar xz
+mv workload-exporter-VERSION-linux-amd64 workload-exporter
+```
+
+#### Linux (arm64)
+```bash
+curl -L https://github.com/cockroachlabs/workload-exporter/releases/download/VERSION/workload-exporter-VERSION-linux-arm64.tar.gz | tar xz
+mv workload-exporter-VERSION-linux-arm64 workload-exporter
 ```
 
 #### Windows
-Download `workload-exporter-windows-amd64.exe` from the [releases page](https://github.com/cockroachlabs/workload-exporter/releases).
+Download `workload-exporter-VERSION-windows-amd64.zip` from the [releases page](https://github.com/cockroachlabs/workload-exporter/releases) and extract it.
 
 ### Verify Installation
 
 ```bash
 ./workload-exporter version
+```
+
+### Updating
+
+Update to the latest release in-place:
+
+```bash
+./workload-exporter update
+```
+
+Check if a newer version is available without installing:
+
+```bash
+./workload-exporter update --check
 ```
 
 ## Quick Start
