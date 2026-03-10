@@ -75,13 +75,16 @@ type Table struct {
 	Name string
 	// TimeColumn is the column name used for time-based filtering (empty if not applicable)
 	TimeColumn string
+	// Optional indicates that export failures should be logged as warnings rather than errors.
+	// Use this for tables that may not be available in all cluster configurations (e.g. Cloud virtual clusters).
+	Optional bool
 }
 
 var exportTables = []Table{
 	Table{Database: "crdb_internal", Name: "statement_statistics", TimeColumn: "aggregated_ts"},
 	Table{Database: "crdb_internal", Name: "transaction_statistics", TimeColumn: "aggregated_ts"},
 	Table{Database: "crdb_internal", Name: "transaction_contention_events", TimeColumn: "collection_ts"},
-	Table{Database: "crdb_internal", Name: "gossip_nodes", TimeColumn: ""},
+	Table{Database: "crdb_internal", Name: "gossip_nodes", TimeColumn: "", Optional: true},
 	Table{Database: "", Name: "crdb_internal.table_indexes", TimeColumn: ""}, // Use "" to query across all databases
 }
 
@@ -248,9 +251,12 @@ func (exporter *Exporter) Export() error {
 
 	logrus.Info("starting table export")
 	for _, table := range exportTables {
-
 		logrus.Infof(" exporting table '%s.%s'", table.Database, table.Name)
-		if err := exporter.exportTable(ctx, tempDir, table, agg); err != nil { // exportTableData(ctx, conn, dbName, tableName, dataFile); err != nil {
+		if err := exporter.exportTable(ctx, tempDir, table, agg); err != nil {
+			if table.Optional {
+				logrus.WithError(err).Warnf("skipping optional table %s.%s (not available in this cluster configuration)", table.Database, table.Name)
+				continue
+			}
 			return fmt.Errorf("failed to export data for table %s.%s: %w", table.Database, table.Name, err)
 		}
 	}
