@@ -4,7 +4,7 @@ This guide is for developers who want to build, test, or contribute to the workl
 
 ## Prerequisites
 
-- Go 1.18 or later
+- Go 1.23 or later
 - Git
 
 ## Building from Source
@@ -64,11 +64,17 @@ workload-exporter/
 ├── cmd/               # CLI commands
 │   ├── root.go       # Root command
 │   ├── export.go     # Export command
+│   ├── update.go     # Update command
 │   └── version.go    # Version command
 ├── pkg/
-│   └── export/       # Core export functionality
-│       ├── exporter.go       # Main exporter logic
-│       └── exporter_test.go  # Unit tests
+│   ├── export/       # Core export functionality
+│   │   ├── exporter.go       # Main exporter logic
+│   │   └── exporter_test.go  # Unit tests
+│   └── update/       # Self-update functionality
+│       ├── update.go         # Update check, caching, and semver comparison
+│       ├── selfupdate.go     # Binary download, checksum verification, and replacement
+│       ├── update_test.go    # Unit tests for update checking
+│       └── selfupdate_test.go # Unit tests for self-update
 ├── docs/             # Documentation
 ├── Makefile          # Build automation
 └── go.mod            # Go dependencies
