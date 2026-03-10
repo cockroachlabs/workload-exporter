@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/cockroachlabs/workload-exporter/pkg/update"
+	"github.com/cockroachlabs/workload-exporter/internal/update"
 	"github.com/spf13/cobra"
 )
 
