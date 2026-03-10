@@ -171,6 +171,7 @@ ls export-contents/*.schema.txt
 - **Schema only** - Table schemas are exported, but **no actual table data** is included
 - **Read-only** - The tool only reads data and makes no modifications to your cluster
 - **Local export** - All data is written to a local zip file under your control
+- **Verified updates** - `workload-exporter update` verifies the SHA256 checksum of the downloaded binary against the checksums published with each GitHub release before installing
 
 ## Requirements
 

@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/cockroachlabs/workload-exporter/internal/update"
+	"github.com/cockroachlabs/workload-exporter/pkg/update"
 	"github.com/spf13/cobra"
 )
 
@@ -27,7 +27,9 @@ func newUpdateCmd() *cobra.Command {
 				return runUpdateCheck(cmd.Context())
 			}
 
-			return update.PerformUpdate(cmd.Context(), os.Stdout, Version)
+			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
+			defer cancel()
+			return update.PerformUpdate(ctx, os.Stdout, Version)
 		},
 	}
 
@@ -53,7 +55,7 @@ func runUpdateCheck(ctx context.Context) error {
 		return fmt.Errorf("update check failed: %w", err)
 	}
 
-	if result.TagName == Version {
+	if !update.IsNewer(result.TagName, Version) {
 		fmt.Println("up to date")
 	} else {
 		fmt.Printf("\nnew version available: %s (current: %s)\n", result.TagName, Version)

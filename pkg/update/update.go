@@ -4,16 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 )
 
 const (
-	repo          = "cockroachlabs/workload-exporter"
-	cacheFile     = "update-check.json"
-	checkInterval = 24 * time.Hour
+	repo               = "cockroachlabs/workload-exporter"
+	cacheFile          = "update-check.json"
+	checkInterval      = 24 * time.Hour
+	maxAPIResponseSize = 1 << 20 // 1 MB, well above any real GitHub API response
 )
 
 // ReleaseInfo holds information about the latest GitHub release.
@@ -129,7 +133,7 @@ func (c *Checker) Check(ctx context.Context) (*ReleaseInfo, error) {
 	}
 
 	var release ReleaseInfo
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxAPIResponseSize)).Decode(&release); err != nil {
 		return nil, fmt.Errorf("decoding GitHub response: %w", err)
 	}
 
@@ -156,7 +160,7 @@ func (c *Checker) NotifyIfNeeded(ctx context.Context) string {
 			lastCheck, err := time.Parse(time.RFC3339, cached.LastCheck)
 			if err == nil && c.deps.Now().Sub(lastCheck) < checkInterval {
 				// Return cached result without making an API call.
-				if cached.LatestTag != "" && cached.LatestTag != c.deps.Version {
+				if cached.LatestTag != "" && semverGreater(cached.LatestTag, c.deps.Version) {
 					return fmt.Sprintf("workload-exporter: update available (%s -> %s). Run 'workload-exporter update' to install.", c.deps.Version, cached.LatestTag)
 				}
 				return ""
@@ -168,8 +172,58 @@ func (c *Checker) NotifyIfNeeded(ctx context.Context) string {
 	if err != nil || result == nil {
 		return ""
 	}
-	if result.TagName != c.deps.Version {
+	if semverGreater(result.TagName, c.deps.Version) {
 		return fmt.Sprintf("workload-exporter: update available (%s -> %s). Run 'workload-exporter update' to install.", c.deps.Version, result.TagName)
 	}
 	return ""
+}
+
+// IsNewer reports whether version a is strictly newer than version b using
+// semver ordering (vMAJOR.MINOR.PATCH with optional pre-release suffix).
+// Returns false if either value is not a valid semver string.
+func IsNewer(a, b string) bool {
+	return semverGreater(a, b)
+}
+
+// semverGreater reports whether a is strictly greater than b.
+func semverGreater(a, b string) bool {
+	sa, oka := parseSemver(a)
+	sb, okb := parseSemver(b)
+	if !oka || !okb {
+		return false
+	}
+	for i := range sa.core {
+		if sa.core[i] != sb.core[i] {
+			return sa.core[i] > sb.core[i]
+		}
+	}
+	// Equal core versions: release > pre-release.
+	return sb.pre != "" && sa.pre == ""
+}
+
+type semver struct {
+	core [3]int
+	pre  string // empty for release versions
+}
+
+func parseSemver(v string) (semver, bool) {
+	v = strings.TrimPrefix(v, "v")
+	pre := ""
+	if i := strings.IndexByte(v, '-'); i >= 0 {
+		pre = v[i+1:]
+		v = v[:i]
+	}
+	parts := strings.SplitN(v, ".", 3)
+	if len(parts) != 3 {
+		return semver{}, false
+	}
+	var core [3]int
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return semver{}, false
+		}
+		core[i] = n
+	}
+	return semver{core: core, pre: pre}, true
 }

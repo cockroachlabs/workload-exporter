@@ -3,6 +3,8 @@ package update
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -159,6 +161,106 @@ func TestPerformUpdate_BadVersionOutput(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unexpected version output") {
 		t.Errorf("error = %q, want it to contain 'unexpected version output'", err)
+	}
+}
+
+func TestPerformUpdate_VersionMismatch(t *testing.T) {
+	_, binaryPath := setupBinary(t)
+	deps := fakeDeps(t, binaryPath)
+	// RunVersion returns the wrong version tag.
+	deps.RunVersion = func(_ context.Context, _ string) (string, error) {
+		return "workload-exporter version v1.0.0", nil
+	}
+
+	var buf bytes.Buffer
+	err := performUpdate(context.Background(), &buf, deps)
+	if err == nil {
+		t.Fatal("expected error for version mismatch, got nil")
+	}
+	if !strings.Contains(err.Error(), "sanity check failed") {
+		t.Errorf("error = %q, want it to contain 'sanity check failed'", err)
+	}
+}
+
+func TestPerformUpdate_Downgrade(t *testing.T) {
+	_, binaryPath := setupBinary(t)
+	deps := fakeDeps(t, binaryPath)
+	// Simulate a case where the installed binary is already newer than "latest".
+	deps.CurrentVersion = "v3.0.0"
+	deps.CheckLatest = func(_ context.Context) (*ReleaseInfo, error) {
+		return &ReleaseInfo{TagName: "v2.0.0"}, nil
+	}
+
+	var buf bytes.Buffer
+	err := performUpdate(context.Background(), &buf, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(buf.String(), "already up to date") {
+		t.Errorf("expected 'already up to date' for downgrade scenario:\n%s", buf.String())
+	}
+
+	// Binary should be untouched.
+	data, _ := os.ReadFile(binaryPath)
+	if string(data) != "old-binary" {
+		t.Error("binary should not have been replaced in downgrade scenario")
+	}
+}
+
+// --- verifyChecksum tests ---
+
+func checksumLine(data []byte, filename string) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]) + "  " + filename + "\n"
+}
+
+func TestVerifyChecksum_Valid(t *testing.T) {
+	data := []byte("binary content")
+	checksumFile := checksumLine(data, "myfile.tar.gz")
+
+	if err := verifyChecksum(data, "myfile.tar.gz", []byte(checksumFile)); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestVerifyChecksum_ValidAmongMultipleEntries(t *testing.T) {
+	data := []byte("binary content")
+	checksumFile := "aaaa  other-file.zip\n" + checksumLine(data, "myfile.tar.gz") + "bbbb  another.tar.gz\n"
+
+	if err := verifyChecksum(data, "myfile.tar.gz", []byte(checksumFile)); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestVerifyChecksum_Mismatch(t *testing.T) {
+	data := []byte("binary content")
+	wrong := strings.Repeat("a", 64) + "  myfile.tar.gz\n"
+
+	err := verifyChecksum(data, "myfile.tar.gz", []byte(wrong))
+	if err == nil {
+		t.Fatal("expected checksum mismatch error")
+	}
+	if !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Errorf("error %q should mention 'checksum mismatch'", err)
+	}
+}
+
+func TestVerifyChecksum_NotFound(t *testing.T) {
+	checksumFile := "abc123  other-file.tar.gz\n"
+
+	err := verifyChecksum([]byte("data"), "myfile.tar.gz", []byte(checksumFile))
+	if err == nil {
+		t.Fatal("expected not-found error")
+	}
+	if !strings.Contains(err.Error(), "no checksum entry") {
+		t.Errorf("error %q should mention 'no checksum entry'", err)
+	}
+}
+
+func TestVerifyChecksum_EmptyFile(t *testing.T) {
+	err := verifyChecksum([]byte("data"), "myfile.tar.gz", []byte(""))
+	if err == nil {
+		t.Fatal("expected error for empty checksums file")
 	}
 }
 

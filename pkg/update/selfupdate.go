@@ -6,6 +6,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +18,11 @@ import (
 	"runtime"
 	"strings"
 	"time"
+)
+
+const (
+	maxBinarySize   = 100 * 1024 * 1024 // 100 MB guard against runaway downloads
+	maxChecksumSize = 1 << 20           // 1 MB, well above any real checksums.txt
 )
 
 // UpdateDeps holds the external dependencies for PerformUpdate.
@@ -42,7 +50,9 @@ func defaultUpdateDeps(version string) UpdateDeps {
 		CheckLatest: func(ctx context.Context) (*ReleaseInfo, error) {
 			return Check(ctx, version)
 		},
-		Download:       defaultDownload,
+		Download: func(ctx context.Context, v string) ([]byte, error) {
+			return defaultDownload(ctx, http.DefaultClient, v)
+		},
 		RunVersion:     defaultRunVersion,
 		CurrentVersion: version,
 	}
@@ -74,30 +84,64 @@ func assetDownloadURL(version string) string {
 	return fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", repo, version, assetName(version))
 }
 
-func defaultDownload(ctx context.Context, version string) ([]byte, error) {
-	downloadURL := assetDownloadURL(version)
-	req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := http.DefaultClient.Do(req)
+func defaultDownload(ctx context.Context, client HTTPDoer, version string) ([]byte, error) {
+	// Download the release archive.
+	archiveData, err := fetchURL(ctx, client, assetDownloadURL(version), maxBinarySize)
 	if err != nil {
 		return nil, fmt.Errorf("downloading asset: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("asset download returned %d", resp.StatusCode)
-	}
-
-	archiveData, err := io.ReadAll(resp.Body)
+	// Download checksums.txt and verify the archive before extracting.
+	checksumURL := fmt.Sprintf("https://github.com/%s/releases/download/%s/checksums.txt", repo, version)
+	checksumData, err := fetchURL(ctx, client, checksumURL, maxChecksumSize)
 	if err != nil {
-		return nil, fmt.Errorf("reading asset: %w", err)
+		return nil, fmt.Errorf("downloading checksums: %w", err)
+	}
+	if err := verifyChecksum(archiveData, assetName(version), checksumData); err != nil {
+		return nil, err
 	}
 
 	// Extract binary from archive.
 	return extractBinary(archiveData, version)
+}
+
+// fetchURL performs a GET request and returns the response body, bounded by limit bytes.
+func fetchURL(ctx context.Context, client HTTPDoer, url string, limit int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d for %s", resp.StatusCode, url)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, limit))
+}
+
+// verifyChecksum checks the SHA256 of data against the entry for filename in
+// a checksums.txt file (sha256sum format: "<hash>  <filename>").
+func verifyChecksum(data []byte, filename string, checksumFile []byte) error {
+	for _, line := range strings.Split(string(checksumFile), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) != 2 || parts[1] != filename {
+			continue
+		}
+		sum := sha256.Sum256(data)
+		actual := hex.EncodeToString(sum[:])
+		if actual != parts[0] {
+			return fmt.Errorf("checksum mismatch for %s: got %s, want %s", filename, actual, parts[0])
+		}
+		return nil
+	}
+	return fmt.Errorf("no checksum entry found for %s in checksums.txt", filename)
 }
 
 // extractBinary extracts the workload-exporter binary from a .tar.gz or .zip archive.
@@ -120,14 +164,14 @@ func extractFromTarGz(data []byte, wantName string) ([]byte, error) {
 	tr := tar.NewReader(gz)
 	for {
 		hdr, err := tr.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
 			return nil, fmt.Errorf("reading tar: %w", err)
 		}
 		if hdr.Name == wantName || filepath.Base(hdr.Name) == wantName {
-			return io.ReadAll(tr)
+			return io.ReadAll(io.LimitReader(tr, maxBinarySize))
 		}
 	}
 	return nil, fmt.Errorf("binary %s not found in archive", wantName)
@@ -145,7 +189,7 @@ func extractFromZip(data []byte, wantName string) ([]byte, error) {
 				return nil, err
 			}
 			defer func() { _ = rc.Close() }()
-			return io.ReadAll(rc)
+			return io.ReadAll(io.LimitReader(rc, maxBinarySize))
 		}
 	}
 	return nil, fmt.Errorf("binary %s not found in archive", wantName)
@@ -180,7 +224,7 @@ func performUpdate(ctx context.Context, w io.Writer, deps UpdateDeps) error {
 		return nil
 	}
 
-	if release.TagName == deps.CurrentVersion {
+	if !semverGreater(release.TagName, deps.CurrentVersion) {
 		_, _ = fmt.Fprintf(w, "already up to date (%s)\n", deps.CurrentVersion)
 		return nil
 	}
@@ -232,6 +276,9 @@ func performUpdate(ctx context.Context, w io.Writer, deps UpdateDeps) error {
 	if !strings.Contains(newVersion, "workload-exporter") {
 		return fmt.Errorf("sanity check failed: unexpected version output: %s", newVersion)
 	}
+	if !strings.Contains(newVersion, release.TagName) {
+		return fmt.Errorf("sanity check failed: version output %q does not contain expected %s", newVersion, release.TagName)
+	}
 
 	_, _ = fmt.Fprintf(w, "verified: %s\n", newVersion)
 
@@ -265,9 +312,9 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = out.Close() }()
 
 	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
 		return err
 	}
 	return out.Close()

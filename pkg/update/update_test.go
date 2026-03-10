@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -114,7 +115,7 @@ func TestCheck_APIError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for 500 response")
 	}
-	if want := "500"; !containsStr(err.Error(), want) {
+	if want := "500"; !strings.Contains(err.Error(), want) {
 		t.Errorf("error %q does not contain %q", err, want)
 	}
 }
@@ -198,7 +199,7 @@ func TestNotify_FreshCacheUpdateAvailable(t *testing.T) {
 	if msg == "" {
 		t.Error("expected notification, got empty")
 	}
-	if want := "v2.0.0"; !containsStr(msg, want) {
+	if want := "v2.0.0"; !strings.Contains(msg, want) {
 		t.Errorf("msg %q does not contain %q", msg, want)
 	}
 	if called {
@@ -220,7 +221,7 @@ func TestNotify_StaleCache(t *testing.T) {
 	if !called {
 		t.Error("HTTP request should be made for stale cache")
 	}
-	if want := "v2.0.0"; !containsStr(msg, want) {
+	if want := "v2.0.0"; !strings.Contains(msg, want) {
 		t.Errorf("msg %q does not contain %q", msg, want)
 	}
 }
@@ -270,6 +271,45 @@ func TestNotify_APIErrorSwallowed(t *testing.T) {
 	}
 }
 
+// --- semver tests ---
+
+func TestSemverGreater(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want bool
+	}{
+		// Major version bumps.
+		{"v2.0.0", "v1.7.1", true},
+		{"v1.7.1", "v2.0.0", false},
+		// Minor version bumps.
+		{"v1.8.0", "v1.7.1", true},
+		{"v1.7.1", "v1.8.0", false},
+		// Patch version bumps.
+		{"v1.7.2", "v1.7.1", true},
+		{"v1.7.1", "v1.7.2", false},
+		// Equality.
+		{"v1.7.1", "v1.7.1", false},
+		// Pre-release: release > pre-release of same version.
+		{"v2.0.0", "v2.0.0-rc1", true},
+		{"v2.0.0-rc1", "v2.0.0", false},
+		// Pre-release: newer pre-release still beats older release.
+		{"v2.0.0-rc1", "v1.7.1", true},
+		// Downgrade: older is not greater.
+		{"v1.0.0", "v2.0.0", false},
+		// Invalid versions: always false.
+		{"dev", "v1.7.1", false},
+		{"v1.7.1", "dev", false},
+		{"", "", false},
+		{"not-a-version", "also-not", false},
+	}
+	for _, tt := range tests {
+		got := semverGreater(tt.a, tt.b)
+		if got != tt.want {
+			t.Errorf("semverGreater(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
+		}
+	}
+}
+
 // --- helpers ---
 
 func seedCache(t *testing.T, c *Checker, latestTag string, lastCheck time.Time) {
@@ -288,13 +328,4 @@ func seedCache(t *testing.T, c *Checker, latestTag string, lastCheck time.Time) 
 	if err := os.WriteFile(c.cachePath(), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func containsStr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
