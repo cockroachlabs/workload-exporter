@@ -26,7 +26,7 @@ Download the latest release for your platform from the [**Releases Page**](https
 Set the version variable first, then run the command for your platform:
 
 ```bash
-VERSION=v1.7.1  # replace with the desired release tag
+VERSION=v1.9.0  # replace with the desired release tag
 ```
 
 #### macOS (Apple Silicon)
