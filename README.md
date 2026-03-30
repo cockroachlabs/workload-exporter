@@ -84,7 +84,7 @@ Export the last 2 hours of workload data (default):
 
 ```bash
 ./workload-exporter export \
-  -c "postgresql://user:password@host:26257/?sslmode=verify-full"
+  --url "postgresql://user:password@host:26257/?sslmode=verify-full"
 ```
 
 This creates `workload-export.zip` in the current directory.
@@ -95,33 +95,96 @@ Export data for a specific time period:
 
 ```bash
 ./workload-exporter export \
-  -c "postgresql://user:password@host:26257/?sslmode=verify-full" \
+  --url "postgresql://user:password@host:26257/?sslmode=verify-full" \
   -s "2025-04-18T13:00:00Z" \
   -e "2025-04-18T20:00:00Z" \
   -o "incident-export.zip"
 ```
 
+## Connecting to a Cluster
+
+The connection flags are intentionally compatible with `cockroach sql`. If you already know how to connect with `cockroach sql`, the same flags and environment variables work here.
+
+### Using a Connection URL
+
+```bash
+./workload-exporter export --url "postgresql://user:password@host:26257/defaultdb?sslmode=verify-full"
+```
+
+The `COCKROACH_URL` environment variable is also supported:
+
+```bash
+export COCKROACH_URL="postgresql://user:password@host:26257/defaultdb?sslmode=verify-full"
+./workload-exporter export
+```
+
+### Using Discrete Flags
+
+Individual connection flags can be used instead of a URL:
+
+```bash
+./workload-exporter export \
+  --host my-cluster.example.com \
+  --port 26257 \
+  --user myuser \
+  --database mydb \
+  --certs-dir /path/to/certs
+```
+
+For insecure clusters:
+
+```bash
+./workload-exporter export --host localhost --insecure
+```
+
+### Environment Variables
+
+Each discrete flag has a corresponding `COCKROACH_*` environment variable, matching `cockroach sql` conventions:
+
+| Flag | Environment Variable | Default |
+|---|---|---|
+| `--url` | `COCKROACH_URL` | — |
+| `--user` | `COCKROACH_USER` | `root` |
+| `--database` | `COCKROACH_DATABASE` | — |
+| `--insecure` | `COCKROACH_INSECURE` | `false` |
+| `--certs-dir` | `COCKROACH_CERTS_DIR` | `~/.cockroach-certs` |
+
+### Connection Priority
+
+When multiple connection options are provided, the following priority applies:
+
+1. `--url` flag
+2. `COCKROACH_URL` environment variable
+3. Discrete flags (`--host`, `--port`, `--user`, `--database`, `--insecure`, `--certs-dir`) with `COCKROACH_*` env var fallbacks
+
+### TLS Behavior (discrete flags)
+
+When connecting via discrete flags without `--insecure`, the tool checks `--certs-dir` (default `~/.cockroach-certs`) for certificate files and selects the appropriate SSL mode:
+
+| Certs found | SSL mode |
+|---|---|
+| `ca.crt` + `client.<user>.crt` + `client.<user>.key` | `verify-full` with all certs |
+| `ca.crt` only | `verify-full` with root cert |
+| None | `require` |
+
 ## Command Options
 
 ```
 Flags:
-  -c, --connection-url string   CockroachDB connection string (required)
+      --url string              Connection URL (env: COCKROACH_URL)
+      --host string             Database host (default "localhost")
+      --port int                Database port (default 26257)
+  -u, --user string             Database user (default "root") (env: COCKROACH_USER)
+  -d, --database string         Database name (env: COCKROACH_DATABASE)
+      --insecure                Connect without TLS (env: COCKROACH_INSECURE)
+      --certs-dir string        Path to certificate directory (default "~/.cockroach-certs") (env: COCKROACH_CERTS_DIR)
   -o, --output-file string      Output zip file (default: "workload-export.zip")
   -s, --start string            Start time in RFC3339 format (default: 2 hours ago)
   -e, --end string              End time in RFC3339 format (default: 1 hour from now)
       --debug                   Enable debug logging
 ```
 
-### Connection String Format
-
-```
-postgresql://[user]:[password]@[host]:[port]/[database]?sslmode=[mode]
-```
-
-**Example:**
-```
-postgresql://admin:mypassword@my-cluster.example.com:26257/defaultdb?sslmode=verify-full
-```
+> **Deprecated:** The `-c` / `--connection-url` flag is deprecated. Use `--url` instead.
 
 ## What Data is Collected
 
@@ -205,7 +268,7 @@ For more restrictive permissions, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOO
 ```bash
 # Export data from when the issue occurred
 ./workload-exporter export \
-  -c "connection-string" \
+  --url "postgresql://user:password@host:26257/?sslmode=verify-full" \
   -s "2025-04-18T14:00:00Z" \
   -e "2025-04-18T16:00:00Z" \
   -o "performance-issue.zip"
@@ -216,7 +279,7 @@ For more restrictive permissions, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOO
 ```bash
 # Export the last 24 hours
 ./workload-exporter export \
-  -c "connection-string" \
+  --url "postgresql://user:password@host:26257/?sslmode=verify-full" \
   -s "$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)" \
   -e "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   -o "daily-$(date +%Y%m%d).zip"
@@ -227,7 +290,7 @@ For more restrictive permissions, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOO
 ```bash
 # Capture workload before a migration
 ./workload-exporter export \
-  -c "connection-string" \
+  --url "postgresql://user:password@host:26257/?sslmode=verify-full" \
   -o "pre-migration-baseline.zip"
 ```
 
@@ -246,7 +309,7 @@ See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for solutions to common i
 For detailed information about what the tool is doing:
 
 ```bash
-./workload-exporter export -c "connection-string" --debug
+./workload-exporter export --url "postgresql://user:password@host:26257/?sslmode=verify-full" --debug
 ```
 
 ### Support
