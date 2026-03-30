@@ -20,6 +20,7 @@ var userFlag string
 var databaseFlag string
 var insecureFlag bool
 var certsDirFlag string
+var passwordFlag string
 
 var exportCmd = &cobra.Command{
 	Use:   "export",
@@ -44,6 +45,8 @@ var exportCmd = &cobra.Command{
 			Port:         portFlag,
 			User:         userFlag,
 			UserSet:      cmd.Flags().Changed("user"),
+			Password:     passwordFlag,
+			PasswordSet:  cmd.Flags().Changed("password"),
 			Database:     databaseFlag,
 			DatabaseSet:  cmd.Flags().Changed("database"),
 			Insecure:     insecureFlag,
@@ -89,6 +92,7 @@ func init() {
 	exportCmd.Flags().StringVarP(&databaseFlag, "database", "d", "", "database name\n(env: COCKROACH_DATABASE)")
 	exportCmd.Flags().BoolVar(&insecureFlag, "insecure", false, "connect without TLS (env: COCKROACH_INSECURE)")
 	exportCmd.Flags().StringVar(&certsDirFlag, "certs-dir", connect.DefaultCertsDir(), "path to certificate directory\n(env: COCKROACH_CERTS_DIR)")
+	exportCmd.Flags().StringVar(&passwordFlag, "password", "", "database password (prefer COCKROACH_PASSWORD env var in scripts)\n(env: COCKROACH_PASSWORD)")
 }
 
 func defaultStartFlag() string {

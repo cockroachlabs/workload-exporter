@@ -32,6 +32,8 @@ type ConnectionConfig struct {
 	Insecure bool
 	// CertsDir is the path to the certificate directory (--certs-dir flag).
 	CertsDir string
+	// Password is the database password (--password flag).
+	Password string
 
 	// URLSet indicates --url was explicitly provided.
 	URLSet bool
@@ -45,6 +47,8 @@ type ConnectionConfig struct {
 	InsecureSet bool
 	// CertsDirSet indicates --certs-dir was explicitly provided.
 	CertsDirSet bool
+	// PasswordSet indicates --password was explicitly provided.
+	PasswordSet bool
 }
 
 // DefaultCertsDir returns the default certificate directory (~/.cockroach-certs),
@@ -93,10 +97,16 @@ func BuildConnectionURL(cfg ConnectionConfig) (string, error) {
 	host := cfg.Host
 	port := cfg.Port
 	user := cfg.User
+	password := cfg.Password
 	database := cfg.Database
 	insecure := cfg.Insecure
 	certsDir := cfg.CertsDir
 
+	if !cfg.PasswordSet {
+		if v := os.Getenv("COCKROACH_PASSWORD"); v != "" {
+			password = v
+		}
+	}
 	if !cfg.UserSet {
 		if v := os.Getenv("COCKROACH_USER"); v != "" {
 			user = v
@@ -122,9 +132,16 @@ func BuildConnectionURL(cfg ConnectionConfig) (string, error) {
 		}
 	}
 
+	var userInfo *url.Userinfo
+	if password != "" {
+		userInfo = url.UserPassword(user, password)
+	} else {
+		userInfo = url.User(user)
+	}
+
 	u := &url.URL{
 		Scheme: "postgresql",
-		User:   url.User(user),
+		User:   userInfo,
 		Host:   fmt.Sprintf("%s:%d", host, port),
 		Path:   database,
 	}

@@ -861,3 +861,114 @@ func TestBuildConnectionURL_TLS_MissingCertFallsBackToCAOnly(t *testing.T) {
 		t.Errorf("expected no sslcert with missing cert file, got %q", u.Query().Get("sslcert"))
 	}
 }
+
+// =====================================================================
+// BuildConnectionURL — password
+// =====================================================================
+
+// --password flag sets the password in the URL.
+func TestBuildConnectionURL_PasswordFlag(t *testing.T) {
+	cfg := insecureCfg("localhost", 26257, "myuser")
+	cfg.Password = "secret"
+	cfg.PasswordSet = true
+
+	got, err := connect.BuildConnectionURL(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	u := parseURL(t, got)
+	pass, hasPass := u.User.Password()
+	if !hasPass {
+		t.Fatal("expected password in URL, got none")
+	}
+	if pass != "secret" {
+		t.Errorf("password: got %q, want %q", pass, "secret")
+	}
+}
+
+// COCKROACH_PASSWORD env var is applied when PasswordSet=false.
+func TestBuildConnectionURL_EnvPasswordApplied(t *testing.T) {
+	t.Setenv("COCKROACH_PASSWORD", "envpassword")
+
+	cfg := insecureCfg("localhost", 26257, "myuser")
+	// PasswordSet: false → env var applies
+
+	got, err := connect.BuildConnectionURL(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	u := parseURL(t, got)
+	pass, hasPass := u.User.Password()
+	if !hasPass {
+		t.Fatal("expected password from COCKROACH_PASSWORD, got none")
+	}
+	if pass != "envpassword" {
+		t.Errorf("password: got %q, want %q", pass, "envpassword")
+	}
+}
+
+// COCKROACH_PASSWORD is ignored when PasswordSet=true.
+func TestBuildConnectionURL_EnvPasswordIgnoredWhenFlagSet(t *testing.T) {
+	t.Setenv("COCKROACH_PASSWORD", "envpassword")
+
+	cfg := insecureCfg("localhost", 26257, "myuser")
+	cfg.Password = "flagpassword"
+	cfg.PasswordSet = true
+
+	got, err := connect.BuildConnectionURL(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	u := parseURL(t, got)
+	pass, _ := u.User.Password()
+	if pass != "flagpassword" {
+		t.Errorf("password: got %q, want flagpassword; COCKROACH_PASSWORD must be ignored when PasswordSet=true", pass)
+	}
+}
+
+// Empty password must not produce the "user:@host" URL form.
+func TestBuildConnectionURL_EmptyPasswordOmitsPasswordField(t *testing.T) {
+	cfg := insecureCfg("localhost", 26257, "myuser")
+	cfg.Password = ""
+	cfg.PasswordSet = true
+
+	got, err := connect.BuildConnectionURL(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	u := parseURL(t, got)
+	_, hasPass := u.User.Password()
+	if hasPass {
+		t.Error("expected no password field in URL for empty password")
+	}
+	// URL should not contain the bare colon before the @ sign
+	if strings.Contains(got, ":@") {
+		t.Errorf("URL contains bare colon-at %q, want clean user@host form", got)
+	}
+}
+
+// Special characters in the password must be percent-encoded in the URL.
+func TestBuildConnectionURL_PasswordSpecialCharsEncoded(t *testing.T) {
+	cfg := insecureCfg("localhost", 26257, "myuser")
+	cfg.Password = "p@ss:w/ord#1"
+	cfg.PasswordSet = true
+
+	got, err := connect.BuildConnectionURL(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Parse back — net/url must round-trip the password correctly.
+	u := parseURL(t, got)
+	pass, hasPass := u.User.Password()
+	if !hasPass {
+		t.Fatal("expected password in URL")
+	}
+	if pass != "p@ss:w/ord#1" {
+		t.Errorf("password round-trip: got %q, want %q", pass, "p@ss:w/ord#1")
+	}
+	// The raw URL must not contain the unencoded @ that would break host parsing.
+	rawUserInfo := u.User.String()
+	if strings.Count(rawUserInfo, "@") > 0 {
+		t.Errorf("raw userinfo %q contains unencoded @", rawUserInfo)
+	}
+}

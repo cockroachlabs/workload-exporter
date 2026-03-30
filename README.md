@@ -145,9 +145,12 @@ Each discrete flag has a corresponding `COCKROACH_*` environment variable, match
 |---|---|---|
 | `--url` | `COCKROACH_URL` | — |
 | `--user` | `COCKROACH_USER` | `root` |
+| `--password` | `COCKROACH_PASSWORD` | — |
 | `--database` | `COCKROACH_DATABASE` | — |
 | `--insecure` | `COCKROACH_INSECURE` | `false` |
 | `--certs-dir` | `COCKROACH_CERTS_DIR` | `~/.cockroach-certs` |
+
+> **Note:** Prefer `COCKROACH_PASSWORD` over `--password` in scripts — flag values are visible in the process list.
 
 ### Connection Priority
 
@@ -175,6 +178,7 @@ Flags:
       --host string             Database host (default "localhost")
       --port int                Database port (default 26257)
   -u, --user string             Database user (default "root") (env: COCKROACH_USER)
+      --password string         Database password (env: COCKROACH_PASSWORD)
   -d, --database string         Database name (env: COCKROACH_DATABASE)
       --insecure                Connect without TLS (env: COCKROACH_INSECURE)
       --certs-dir string        Path to certificate directory (default "~/.cockroach-certs") (env: COCKROACH_CERTS_DIR)
