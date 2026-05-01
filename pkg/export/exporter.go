@@ -159,7 +159,7 @@ func (exporter *Exporter) Close() error {
 //   - Cluster metadata (version, ID, name, organization, settings)
 //   - Database schemas (CREATE statements for all user databases)
 //   - Zone configurations
-//   - Statistics tables (statement_statistics, transaction_statistics, transaction_contention_events, gossip_nodes, table_indexes across all databases)
+//   - Statistics tables (statement_statistics, transaction_statistics, transaction_contention_events, gossip_nodes, table_indexes across all databases, system.table_statistics)
 //
 // The statistics tables are filtered by the TimeRange specified in Config.
 // All exported data is written to the OutputFile specified in Config.

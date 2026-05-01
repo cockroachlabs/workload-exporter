@@ -110,6 +110,7 @@ Each integration test validates:
    - `crdb_internal.transaction_contention_events.csv`
    - `crdb_internal.gossip_nodes.csv`
    - `crdb_internal.table_indexes.csv`
+   - `system.table_statistics.csv`
    - `zone_configurations.txt`
    - `testdb.schema.txt` (test database schema)
 4. ✅ CSV files have valid headers

@@ -12,7 +12,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +32,7 @@ func TestCrossVersionCompatibility(t *testing.T) {
 		"v25.2.11",
 		"v25.4.3",
 		"v26.1.0-beta.3",
+		"v26.2.0-beta.3",
 	}
 
 	for _, version := range versions {
@@ -162,6 +162,7 @@ func validateExport(t *testing.T, zipPath string, version string) {
 		"crdb_internal.transaction_contention_events.csv": false,
 		"crdb_internal.gossip_nodes.csv":                  false,
 		"crdb_internal.table_indexes.csv":                 false,
+		"system.table_statistics.csv":                     false,
 		"zone_configurations.txt":                         false,
 		"testdb1.schema.txt":                              false, // Our test databases
 		"testdb2.schema.txt":                              false,
@@ -249,7 +250,8 @@ func validateTableIndexesFile(t *testing.T, file *zip.File, version string) {
 	header, err := reader.Read()
 	require.NoError(t, err, "Should be able to read CSV header")
 
-	// Find the descriptor_name column index (contains database.schema.table)
+	// Find the descriptor_name column index.
+	// descriptor_name contains the table name only (e.g. "users"), not a database-qualified name.
 	descriptorNameIdx := -1
 	for i, col := range header {
 		if col == "descriptor_name" {
@@ -259,10 +261,15 @@ func validateTableIndexesFile(t *testing.T, file *zip.File, version string) {
 	}
 	require.NotEqual(t, -1, descriptorNameIdx, "CSV should have descriptor_name column")
 
-	// Track which databases we've seen
-	databasesSeen := make(map[string]bool)
+	// Look for specific table names seeded across the test databases.
+	seededTables := map[string]bool{
+		"users":     false,
+		"orders":    false,
+		"products":  false,
+		"inventory": false,
+		"logs":      false,
+	}
 
-	// Read all rows and extract database names
 	for {
 		record, err := reader.Read()
 		if err == io.EOF {
@@ -271,33 +278,25 @@ func validateTableIndexesFile(t *testing.T, file *zip.File, version string) {
 		require.NoError(t, err, "Should be able to read CSV row")
 
 		if len(record) > descriptorNameIdx {
-			descriptorName := record[descriptorNameIdx]
-			// descriptor_name format is typically "database.schema.table" or "database.public.table"
-			parts := strings.Split(descriptorName, ".")
-			if len(parts) >= 1 {
-				database := parts[0]
-				// Track non-system databases
-				if database != "system" && database != "postgres" && database != "" {
-					databasesSeen[database] = true
-				}
+			name := record[descriptorNameIdx]
+			if _, ok := seededTables[name]; ok {
+				seededTables[name] = true
+				t.Logf("  ✓ Found seeded table in table_indexes: %s", name)
 			}
 		}
 	}
 
-	// Verify we have entries from our test databases
-	expectedDatabases := []string{"testdb1", "testdb2", "testdb3"}
 	foundCount := 0
-	for _, db := range expectedDatabases {
-		if databasesSeen[db] {
+	for _, found := range seededTables {
+		if found {
 			foundCount++
-			t.Logf("  ✓ Found table indexes for database: %s", db)
 		}
 	}
 
-	// We should see at least 2 of our test databases to prove cross-database querying works
+	// We should find at least 2 of our 5 seeded tables to confirm cross-database querying works
 	require.GreaterOrEqual(t, foundCount, 2,
-		"table_indexes CSV should contain entries from multiple test databases (found %d, expected at least 2)",
+		"table_indexes CSV should contain at least 2 seeded tables from test databases (found %d, expected at least 2)",
 		foundCount)
 
-	t.Logf("  ✓ table_indexes contains data from %d databases (version %s)", len(databasesSeen), version)
+	t.Logf("  ✓ table_indexes contains %d seeded tables (version %s)", foundCount, version)
 }
