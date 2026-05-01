@@ -86,6 +86,7 @@ var exportTables = []Table{
 	Table{Database: "crdb_internal", Name: "transaction_contention_events", TimeColumn: "collection_ts"},
 	Table{Database: "crdb_internal", Name: "gossip_nodes", TimeColumn: "", Optional: true},
 	Table{Database: "", Name: "crdb_internal.table_indexes", TimeColumn: ""}, // Use "" to query across all databases
+	Table{Database: "system", Name: "table_statistics", TimeColumn: ""},
 }
 
 // NewExporter creates a new Exporter instance with the given configuration.
