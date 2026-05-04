@@ -195,7 +195,7 @@ Flags:
 The export creates a **zip file** containing the following files:
 
 ### Metadata
-- **`metadata.json`** - Cluster version, ID, name, organization, and export configuration
+- **`metadata.json`** - Cluster version, ID, name, organization, export configuration, and whether the cluster is a virtual cluster
   - ⚠️ Note: Connection string password is automatically redacted
 
 ### Statistics (CSV format, time-filtered)
@@ -256,6 +256,12 @@ ls export-contents/*.schema.txt
   - Read access to system settings
   - Read access to user databases (for schema export)
   - *Recommended:* Admin role for simplest setup
+
+### Virtual Cluster Support
+
+Virtualized CockroachDB clusters (those with a system virtual cluster and one or more application virtual clusters) are supported. Connect using the URL for the application virtual cluster (typically named `main`) — the tool automatically detects the virtualized deployment and opens a second connection to the system virtual cluster to retrieve cluster-wide data such as node topology.
+
+> **Note:** The user account must have access to **both** the system virtual cluster and the application virtual cluster. If your user exists only in the application virtual cluster, system-level data (such as `gossip_nodes`) will be unavailable.
 
 ### Grant Permissions
 

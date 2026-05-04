@@ -23,14 +23,35 @@ const ExporterVersion = "1.0.0"
 
 var systemDatabases = []string{"system", "crdb_internal", "postgres"}
 
+// TenantScope indicates which virtual cluster a table or query should be routed to.
+// In non-virtualized clusters, all queries use the single connection regardless of scope.
+type TenantScope string
+
+const (
+	// TenantScopeMain routes the query to the main (application) virtual cluster.
+	// This is the default when no scope is specified.
+	TenantScopeMain TenantScope = "main"
+	// TenantScopeSystem routes the query to the system virtual cluster.
+	// Used for cluster-wide data not available in application virtual clusters,
+	// such as gossip_nodes. Auto-detection occurs on first failure.
+	TenantScopeSystem TenantScope = "system"
+	// TenantScopeBoth routes the query to both virtual clusters.
+	// Reserved for future use (e.g., cluster settings available in both tenants).
+	TenantScopeBoth TenantScope = "both"
+)
+
 // Exporter handles the export of workload data from a CockroachDB cluster.
 // It manages database connections and coordinates the export of statistics,
 // schemas, and configurations into a zip file.
 type Exporter struct {
 	// Config contains the export configuration settings
 	Config Config
-	// Db is the active database connection to the CockroachDB cluster
+	// Db is the active database connection to the CockroachDB cluster (main virtual cluster)
 	Db *pgx.Conn
+	// SystemDb is a connection to the system virtual cluster, established lazily when a
+	// TenantScopeSystem query fails against Db with a virtual cluster error. Nil in
+	// non-virtualized clusters.
+	SystemDb *pgx.Conn
 	// CleanConnectionString is the connection string with password redacted
 	CleanConnectionString string
 }
@@ -65,6 +86,7 @@ type Metadata struct {
 	Organization                string        `json:"organization"`
 	SqlStatsAggregationInterval time.Duration `json:"sql.stats.aggregation.interval"`
 	SqlStatsFlushInterval       time.Duration `json:"sql.stats.flush.interval"`
+	VirtualCluster              bool          `json:"virtual_cluster"`
 }
 
 // Table represents a CockroachDB table to be exported with optional time-based filtering.
@@ -78,15 +100,18 @@ type Table struct {
 	// Optional indicates that export failures should be logged as warnings rather than errors.
 	// Use this for tables that may not be available in all cluster configurations (e.g. Cloud virtual clusters).
 	Optional bool
+	// Scope indicates which virtual cluster connection to use for this table.
+	// Defaults to TenantScopeMain when unset.
+	Scope TenantScope
 }
 
 var exportTables = []Table{
-	Table{Database: "crdb_internal", Name: "statement_statistics", TimeColumn: "aggregated_ts"},
-	Table{Database: "crdb_internal", Name: "transaction_statistics", TimeColumn: "aggregated_ts"},
-	Table{Database: "crdb_internal", Name: "transaction_contention_events", TimeColumn: "collection_ts"},
-	Table{Database: "crdb_internal", Name: "gossip_nodes", TimeColumn: "", Optional: true},
-	Table{Database: "", Name: "crdb_internal.table_indexes", TimeColumn: ""}, // Use "" to query across all databases
-	Table{Database: "system", Name: "table_statistics", TimeColumn: ""},
+	{Database: "crdb_internal", Name: "statement_statistics", TimeColumn: "aggregated_ts", Scope: TenantScopeMain},
+	{Database: "crdb_internal", Name: "transaction_statistics", TimeColumn: "aggregated_ts", Scope: TenantScopeMain},
+	{Database: "crdb_internal", Name: "transaction_contention_events", TimeColumn: "collection_ts", Scope: TenantScopeMain},
+	{Database: "crdb_internal", Name: "gossip_nodes", TimeColumn: "", Optional: true, Scope: TenantScopeSystem},
+	{Database: "", Name: "crdb_internal.table_indexes", TimeColumn: "", Scope: TenantScopeMain}, // Use "" to query across all databases
+	{Database: "system", Name: "table_statistics", TimeColumn: "", Scope: TenantScopeMain},
 }
 
 // NewExporter creates a new Exporter instance with the given configuration.
@@ -148,6 +173,9 @@ func NewExporter(config Config) (*Exporter, error) {
 //	}
 //	defer exporter.Close()
 func (exporter *Exporter) Close() error {
+	if exporter.SystemDb != nil {
+		_ = exporter.SystemDb.Close(context.Background())
+	}
 	if exporter.Db != nil {
 		return exporter.Db.Close(context.Background())
 	}
@@ -262,6 +290,8 @@ func (exporter *Exporter) Export() error {
 		}
 	}
 	logrus.Info("finished table export")
+
+	metadata.VirtualCluster = exporter.SystemDb != nil
 
 	metadataFile := filepath.Join(tempDir, "metadata.json")
 	metadataJSON, err := json.MarshalIndent(metadata, "", "  ")
@@ -441,7 +471,34 @@ func (exporter *Exporter) userDatabases() ([]string, error) {
 	return databases, nil
 }
 
+// exportTable routes the table export to the appropriate virtual cluster connection
+// based on the table's Scope. For TenantScopeSystem tables, it first attempts the
+// export using the main connection; if CockroachDB returns a virtual cluster error,
+// it establishes a system connection and retries automatically.
 func (exporter *Exporter) exportTable(ctx context.Context, dir string, table Table, aggregationInterval time.Duration) error {
+	scope := table.Scope
+	if scope == "" {
+		scope = TenantScopeMain
+	}
+
+	conn := exporter.Db
+	if scope == TenantScopeSystem && exporter.SystemDb != nil {
+		conn = exporter.SystemDb
+	}
+
+	err := exporter.doExportTable(ctx, dir, table, aggregationInterval, conn)
+	if err != nil && scope == TenantScopeSystem && isVirtualClusterError(err) {
+		systemConn, connErr := exporter.ensureSystemConn(ctx)
+		if connErr != nil {
+			return fmt.Errorf("failed to connect to system virtual cluster: %w", connErr)
+		}
+		return exporter.doExportTable(ctx, dir, table, aggregationInterval, systemConn)
+	}
+	return err
+}
+
+// doExportTable performs the actual table export using the provided connection.
+func (exporter *Exporter) doExportTable(ctx context.Context, dir string, table Table, aggregationInterval time.Duration, conn *pgx.Conn) error {
 	// Create filename - if database is empty, just use table name
 	var filename string
 	if table.Database == "" {
@@ -463,7 +520,6 @@ func (exporter *Exporter) exportTable(ctx context.Context, dir string, table Tab
 		}
 	}(file)
 
-	// Get column names
 	// Construct table reference - handle empty database for cross-database queries
 	var tableRef string
 	if table.Database == "" {
@@ -473,7 +529,8 @@ func (exporter *Exporter) exportTable(ctx context.Context, dir string, table Tab
 		tableRef = fmt.Sprintf("%s.%s", pgx.Identifier{table.Database}.Sanitize(), pgx.Identifier{table.Name}.Sanitize())
 	}
 
-	rows, err := exporter.Db.Query(ctx, fmt.Sprintf("SELECT * FROM %s LIMIT 0", tableRef))
+	// Get column names
+	rows, err := conn.Query(ctx, fmt.Sprintf("SELECT * FROM %s LIMIT 0", tableRef))
 	if err != nil {
 		return err
 	}
@@ -505,7 +562,7 @@ func (exporter *Exporter) exportTable(ctx context.Context, dir string, table Tab
 		"COPY (SELECT * FROM %s %s) TO STDOUT WITH CSV",
 		tableRef, where)
 	logrus.Info(copyQuery)
-	_, err = exporter.Db.PgConn().CopyTo(ctx, file, copyQuery)
+	_, err = conn.PgConn().CopyTo(ctx, file, copyQuery)
 	if err != nil {
 		return err
 	}
@@ -623,6 +680,57 @@ func enableUnsafeInternalsIfNeeded(ctx context.Context, conn *pgx.Conn) error {
 	}
 
 	return nil
+}
+
+// isVirtualClusterError returns true if the error indicates an operation is unsupported
+// within an application virtual cluster. When this occurs for a TenantScopeSystem table,
+// the exporter will retry the query against the system virtual cluster.
+//
+// The error string "operation is unsupported within a virtual cluster" is produced by
+// CockroachDB when an application tenant attempts to access system-only resources.
+func isVirtualClusterError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "operation is unsupported within a virtual cluster")
+}
+
+// buildSystemConnectionString derives a system virtual cluster connection string from
+// an existing connection string by appending options=-ccluster=system. If the connection
+// string already contains an options parameter, the cluster option is appended to it.
+func buildSystemConnectionString(connStr string) (string, error) {
+	u, err := url.Parse(connStr)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse connection string: %w", err)
+	}
+	q := u.Query()
+	if existing := q.Get("options"); existing != "" {
+		q.Set("options", existing+" -ccluster=system")
+	} else {
+		q.Set("options", "-ccluster=system")
+	}
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+// ensureSystemConn returns the system virtual cluster connection, creating it if needed.
+// It is called lazily when a TenantScopeSystem query fails with a virtual cluster error.
+func (exporter *Exporter) ensureSystemConn(ctx context.Context) (*pgx.Conn, error) {
+	if exporter.SystemDb != nil {
+		return exporter.SystemDb, nil
+	}
+	systemConnStr, err := buildSystemConnectionString(exporter.Config.ConnectionString)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build system connection string: %w", err)
+	}
+	logrus.Info("detected virtual cluster, connecting to system virtual cluster")
+	conn, err := pgx.Connect(ctx, systemConnStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to system virtual cluster: %w", err)
+	}
+	if err := enableUnsafeInternalsIfNeeded(ctx, conn); err != nil {
+		_ = conn.Close(ctx)
+		return nil, err
+	}
+	exporter.SystemDb = conn
+	return conn, nil
 }
 
 // parseMajorVersion extracts the major version number from a CockroachDB version string.

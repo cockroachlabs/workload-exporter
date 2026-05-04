@@ -1,6 +1,7 @@
 package export
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -175,12 +176,116 @@ func TestExportTables(t *testing.T) {
 		t.Error("exportTables should not be empty")
 	}
 
+	validScopes := map[TenantScope]bool{
+		TenantScopeMain:   true,
+		TenantScopeSystem: true,
+		TenantScopeBoth:   true,
+	}
+
 	for i, table := range exportTables {
 		// Database can be empty for cross-database queries (e.g., "".crdb_internal.table_indexes)
 		// but Name must always be present
 		if table.Name == "" {
 			t.Errorf("exportTables[%d].Name should not be empty", i)
 		}
+		if !validScopes[table.Scope] {
+			t.Errorf("exportTables[%d] (%s.%s) has invalid or missing Scope %q", i, table.Database, table.Name, table.Scope)
+		}
+	}
+}
+
+func TestIsVirtualClusterError(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "nil error",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name:     "virtual cluster error",
+			err:      fmt.Errorf("ERROR: operation is unsupported within a virtual cluster (SQLSTATE XXUUU)"),
+			expected: true,
+		},
+		{
+			name:     "wrapped virtual cluster error",
+			err:      fmt.Errorf("failed to query gossip_nodes: operation is unsupported within a virtual cluster"),
+			expected: true,
+		},
+		{
+			name:     "unrelated error",
+			err:      fmt.Errorf("connection refused"),
+			expected: false,
+		},
+		{
+			name:     "permission denied error",
+			err:      fmt.Errorf("ERROR: permission denied for table gossip_nodes"),
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isVirtualClusterError(tt.err)
+			if got != tt.expected {
+				t.Errorf("isVirtualClusterError(%v) = %v, want %v", tt.err, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestBuildSystemConnectionString(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+		wantErr  bool
+	}{
+		{
+			name:     "basic URL",
+			input:    "postgresql://user@localhost:26257/defaultdb",
+			expected: "postgresql://user@localhost:26257/defaultdb?options=-ccluster%3Dsystem",
+			wantErr:  false,
+		},
+		{
+			name:     "URL with existing query params",
+			input:    "postgresql://user@localhost:26257/defaultdb?sslmode=verify-full",
+			expected: "postgresql://user@localhost:26257/defaultdb?options=-ccluster%3Dsystem&sslmode=verify-full",
+			wantErr:  false,
+		},
+		{
+			name:     "URL with existing options param",
+			input:    "postgresql://user@localhost:26257/defaultdb?options=-csomething%3Dvalue",
+			expected: "postgresql://user@localhost:26257/defaultdb?options=-csomething%3Dvalue+-ccluster%3Dsystem",
+			wantErr:  false,
+		},
+		{
+			name:     "URL with password is preserved",
+			input:    "postgresql://user:secret@localhost:26257/defaultdb",
+			expected: "postgresql://user:secret@localhost:26257/defaultdb?options=-ccluster%3Dsystem",
+			wantErr:  false,
+		},
+		{
+			name:    "invalid URL",
+			input:   "://invalid",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := buildSystemConnectionString(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("buildSystemConnectionString() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if got != tt.expected {
+				t.Errorf("buildSystemConnectionString() = %q, want %q", got, tt.expected)
+			}
+		})
 	}
 }
 
