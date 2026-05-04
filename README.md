@@ -214,6 +214,13 @@ The export creates a **zip file** containing the following files:
 
 ### Configuration
 - **`zone_configurations.txt`** - All zone configuration SQL statements
+- **`crdb_internal.cluster_settings.csv`** - All cluster settings and their current values
+- **`system.settings.csv`** - Cluster settings that have been changed from defaults, including timestamps of when they changed
+- ⚠️ Sensitive settings (credentials, keys, PEM data) are automatically redacted to `<redacted>` in both files
+
+In virtualized clusters, settings are exported for each virtual cluster separately:
+- **`crdb_internal.cluster_settings.csv`** / **`system.settings.csv`** — application virtual cluster
+- **`crdb_internal.cluster_settings.system.csv`** / **`system.settings.system.csv`** — system virtual cluster
 
 ## Inspecting the Export
 
@@ -241,6 +248,7 @@ ls export-contents/*.schema.txt
 ## Privacy and Security
 
 - **Passwords are redacted** - Connection string passwords are automatically removed from metadata
+- **Sensitive settings are redacted** - Cluster settings containing credentials, keys, or PEM data (e.g. `enterprise.license`, `cluster.secret`, LDAP/OIDC/JWT config) are exported as `<redacted>`
 - **No query parameters** - Statement statistics include query fingerprints, not actual parameter values
 - **Schema only** - Table schemas are exported, but **no actual table data** is included
 - **Read-only** - The tool only reads data and makes no modifications to your cluster
