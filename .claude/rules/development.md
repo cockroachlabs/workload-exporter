@@ -6,11 +6,15 @@
 
 1. Add a `Table` entry to `exportTables` in `pkg/export/exporter.go`:
    ```go
-   Table{Database: "system", Name: "my_table", TimeColumn: "created_at"},
+   Table{Database: "system", Name: "my_table", TimeColumn: "created_at", Scope: TenantScopeMain},
    ```
    - Set `TimeColumn` to the timestamp column if time-range filtering is needed, or `""` for no filtering.
    - Set `Optional: true` if the table may not exist in all cluster configurations (e.g. Cloud virtual clusters).
    - Use `Database: ""` with a dotted `Name` (e.g. `"crdb_internal.table_indexes"`) to query across all databases.
+   - Set `Scope` to indicate which virtual cluster connection to use:
+     - `TenantScopeMain` — application virtual cluster (default for most tables)
+     - `TenantScopeSystem` — system virtual cluster only (e.g. `gossip_nodes`); auto-detects virtual cluster mode on first failure
+     - `TenantScopeBoth` — reserved for future use
 
 2. Add or update a test in `pkg/export/exporter_test.go`.
 
