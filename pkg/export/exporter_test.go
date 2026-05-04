@@ -195,6 +195,33 @@ func TestExportTables(t *testing.T) {
 	}
 }
 
+func TestExportTablesIncludesNodeCPUMem(t *testing.T) {
+	found := false
+	for _, table := range exportTables {
+		if table.Database == "crdb_internal" && table.Name == "node_cpu_mem" {
+			found = true
+			if table.Scope != TenantScopeSystem {
+				t.Errorf("crdb_internal.node_cpu_mem should have Scope TenantScopeSystem, got %q", table.Scope)
+			}
+			if !table.Optional {
+				t.Error("crdb_internal.node_cpu_mem should be Optional")
+			}
+			if table.Query == "" {
+				t.Error("crdb_internal.node_cpu_mem should have a custom Query")
+			}
+			if !strings.Contains(table.Query, "num_vcpus") {
+				t.Error("crdb_internal.node_cpu_mem Query should select num_vcpus")
+			}
+			if !strings.Contains(table.Query, "total_mem_gib") {
+				t.Error("crdb_internal.node_cpu_mem Query should select total_mem_gib")
+			}
+		}
+	}
+	if !found {
+		t.Error("exportTables should contain crdb_internal.node_cpu_mem")
+	}
+}
+
 func TestExportTablesIncludesClusterSettings(t *testing.T) {
 	found := false
 	for _, table := range exportTables {

@@ -113,6 +113,11 @@ type Table struct {
 	RedactColumn string
 	// RedactedKeys is the set of RedactKeyColumn values for which RedactColumn is redacted.
 	RedactedKeys []string
+	// Query overrides the default SELECT for this table. When set, the query is used as-is
+	// for both column discovery and data export. TimeColumn, RedactKeyColumn, RedactColumn,
+	// and RedactedKeys are ignored when Query is set. The output filename is still derived
+	// from Database and Name.
+	Query string
 }
 
 // sensitiveClusterSettings is the list of cluster setting names whose values are
@@ -140,6 +145,19 @@ var exportTables = []Table{
 	{Database: "crdb_internal", Name: "transaction_statistics", TimeColumn: "aggregated_ts", Scope: TenantScopeMain},
 	{Database: "crdb_internal", Name: "transaction_contention_events", TimeColumn: "collection_ts", Scope: TenantScopeMain},
 	{Database: "crdb_internal", Name: "gossip_nodes", TimeColumn: "", Optional: true, Scope: TenantScopeSystem},
+	{
+		Database: "crdb_internal",
+		Name:     "node_cpu_mem",
+		Optional: true,
+		Scope:    TenantScopeSystem,
+		Query: `SELECT node_id, address,` +
+			` ROUND(` +
+			`((metrics->>'sys.cpu.user.percent')::FLOAT + (metrics->>'sys.cpu.sys.percent')::FLOAT)` +
+			` / NULLIF((metrics->>'sys.cpu.combined.percent-normalized')::FLOAT, 0)` +
+			`)::INT AS num_vcpus,` +
+			` ROUND((metrics->>'sys.totalmem')::FLOAT / 1073741824, 1) AS total_mem_gib` +
+			` FROM crdb_internal.kv_node_status`,
+	},
 	{Database: "", Name: "crdb_internal.table_indexes", TimeColumn: "", Scope: TenantScopeMain}, // Use "" to query across all databases
 	{Database: "system", Name: "table_statistics", TimeColumn: "", Scope: TenantScopeMain},
 	{
@@ -235,7 +253,7 @@ func (exporter *Exporter) Close() error {
 //   - Cluster metadata (version, ID, name, organization, settings)
 //   - Database schemas (CREATE statements for all user databases)
 //   - Zone configurations
-//   - Statistics tables (statement_statistics, transaction_statistics, transaction_contention_events, gossip_nodes, table_indexes across all databases, system.table_statistics)
+//   - Statistics tables (statement_statistics, transaction_statistics, transaction_contention_events, gossip_nodes, node_cpu_mem, table_indexes across all databases, system.table_statistics)
 //   - Cluster settings (crdb_internal.cluster_settings, system.settings) with sensitive values redacted
 //
 // The statistics tables are filtered by the TimeRange specified in Config.
@@ -599,7 +617,13 @@ func (exporter *Exporter) doExportTable(ctx context.Context, dir string, table T
 	}
 
 	// Get column names
-	rows, err := conn.Query(ctx, fmt.Sprintf("SELECT * FROM %s LIMIT 0", tableRef))
+	var colProbeSQL string
+	if table.Query != "" {
+		colProbeSQL = fmt.Sprintf("SELECT * FROM (%s) AS q LIMIT 0", table.Query)
+	} else {
+		colProbeSQL = fmt.Sprintf("SELECT * FROM %s LIMIT 0", tableRef)
+	}
+	rows, err := conn.Query(ctx, colProbeSQL)
 	if err != nil {
 		return err
 	}
@@ -618,22 +642,28 @@ func (exporter *Exporter) doExportTable(ctx context.Context, dir string, table T
 		return err
 	}
 
-	// Use a SQL query to export data in CSV format
-	var where string
-	if table.TimeColumn != "" {
-		where = fmt.Sprintf("WHERE %s BETWEEN '%s' and '%s'",
-			pgx.Identifier{table.TimeColumn}.Sanitize(),
-			startTime(exporter.Config.TimeRange.Start).Format("2006-01-02 15:04:05"), // offset for aggregation interval -- TODO
-			endTime(exporter.Config.TimeRange.End).Format("2006-01-02 15:04:05"),
-		)
+	// Build and run the COPY query.
+	var copyQuery string
+	if table.Query != "" {
+		copyQuery = fmt.Sprintf("COPY (%s) TO STDOUT WITH CSV", table.Query)
+	} else {
+		// Use a SQL query to export data in CSV format
+		var where string
+		if table.TimeColumn != "" {
+			where = fmt.Sprintf("WHERE %s BETWEEN '%s' and '%s'",
+				pgx.Identifier{table.TimeColumn}.Sanitize(),
+				startTime(exporter.Config.TimeRange.Start).Format("2006-01-02 15:04:05"), // offset for aggregation interval -- TODO
+				endTime(exporter.Config.TimeRange.End).Format("2006-01-02 15:04:05"),
+			)
+		}
+
+		// Build SELECT expression, applying column-level redaction when configured.
+		selectExpr := buildSelectExpr(headers, table)
+
+		copyQuery = fmt.Sprintf(
+			"COPY (SELECT %s FROM %s %s) TO STDOUT WITH CSV",
+			selectExpr, tableRef, where)
 	}
-
-	// Build SELECT expression, applying column-level redaction when configured.
-	selectExpr := buildSelectExpr(headers, table)
-
-	copyQuery := fmt.Sprintf(
-		"COPY (SELECT %s FROM %s %s) TO STDOUT WITH CSV",
-		selectExpr, tableRef, where)
 	logrus.Info(copyQuery)
 	_, err = conn.PgConn().CopyTo(ctx, file, copyQuery)
 	if err != nil {
