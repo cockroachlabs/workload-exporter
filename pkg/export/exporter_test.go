@@ -2,6 +2,7 @@ package export
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -192,6 +193,154 @@ func TestExportTables(t *testing.T) {
 			t.Errorf("exportTables[%d] (%s.%s) has invalid or missing Scope %q", i, table.Database, table.Name, table.Scope)
 		}
 	}
+}
+
+func TestExportTablesIncludesClusterSettings(t *testing.T) {
+	found := false
+	for _, table := range exportTables {
+		if table.Database == "crdb_internal" && table.Name == "cluster_settings" {
+			found = true
+			if table.Scope != TenantScopeBoth {
+				t.Errorf("crdb_internal.cluster_settings should have Scope TenantScopeBoth, got %q", table.Scope)
+			}
+			if table.TimeColumn != "" {
+				t.Errorf("crdb_internal.cluster_settings should have no TimeColumn, got %q", table.TimeColumn)
+			}
+			if table.RedactKeyColumn != "variable" {
+				t.Errorf("crdb_internal.cluster_settings RedactKeyColumn should be \"variable\", got %q", table.RedactKeyColumn)
+			}
+			if table.RedactColumn != "value" {
+				t.Errorf("crdb_internal.cluster_settings RedactColumn should be \"value\", got %q", table.RedactColumn)
+			}
+			if len(table.RedactedKeys) == 0 {
+				t.Error("crdb_internal.cluster_settings RedactedKeys should not be empty")
+			}
+		}
+	}
+	if !found {
+		t.Error("exportTables should contain crdb_internal.cluster_settings")
+	}
+}
+
+func TestExportTablesIncludesSystemSettings(t *testing.T) {
+	found := false
+	for _, table := range exportTables {
+		if table.Database == "system" && table.Name == "settings" {
+			found = true
+			if table.Scope != TenantScopeBoth {
+				t.Errorf("system.settings should have Scope TenantScopeBoth, got %q", table.Scope)
+			}
+			if table.RedactKeyColumn != "name" {
+				t.Errorf("system.settings RedactKeyColumn should be \"name\", got %q", table.RedactKeyColumn)
+			}
+			if table.RedactColumn != "value" {
+				t.Errorf("system.settings RedactColumn should be \"value\", got %q", table.RedactColumn)
+			}
+			if len(table.RedactedKeys) == 0 {
+				t.Error("system.settings RedactedKeys should not be empty")
+			}
+		}
+	}
+	if !found {
+		t.Error("exportTables should contain system.settings")
+	}
+}
+
+func TestSensitiveClusterSettings(t *testing.T) {
+	expected := []string{
+		"server.host_based_authentication.configuration",
+		"server.identity_map.configuration",
+		"server.jwt_authentication.issuers.custom_ca",
+		"server.ldap_authentication.domain.custom_ca",
+		"server.ldap_authentication.client.tls_certificate",
+		"server.ldap_authentication.client.tls_key",
+		"server.oidc_authentication.client_id",
+		"server.oidc_authentication.client_secret",
+		"server.oidc_authentication.provider.custom_ca",
+		"sql.override.allow_unsafe_internals.enabled",
+		"cluster.secret",
+		"cluster.label",
+		"enterprise.license",
+	}
+	for _, want := range expected {
+		found := false
+		for _, got := range sensitiveClusterSettings {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("sensitiveClusterSettings is missing %q", want)
+		}
+	}
+}
+
+func TestBuildSelectExpr(t *testing.T) {
+	columns := []string{"variable", "value", "type", "description"}
+
+	t.Run("no redaction returns star", func(t *testing.T) {
+		table := Table{RedactColumn: "", RedactKeyColumn: "", RedactedKeys: nil}
+		got := buildSelectExpr(columns, table)
+		if got != "*" {
+			t.Errorf("expected \"*\", got %q", got)
+		}
+	})
+
+	t.Run("empty RedactedKeys returns star", func(t *testing.T) {
+		table := Table{RedactColumn: "value", RedactKeyColumn: "variable", RedactedKeys: []string{}}
+		got := buildSelectExpr(columns, table)
+		if got != "*" {
+			t.Errorf("expected \"*\", got %q", got)
+		}
+	})
+
+	t.Run("redacted column gets CASE expression", func(t *testing.T) {
+		table := Table{
+			RedactColumn:    "value",
+			RedactKeyColumn: "variable",
+			RedactedKeys:    []string{"cluster.secret", "enterprise.license"},
+		}
+		got := buildSelectExpr(columns, table)
+		// Must contain a CASE expression for the value column
+		if !contains(got, "CASE WHEN") {
+			t.Errorf("expected CASE expression in SELECT, got %q", got)
+		}
+		// Must contain the redacted key literals
+		if !contains(got, "'cluster.secret'") {
+			t.Errorf("expected 'cluster.secret' in SELECT, got %q", got)
+		}
+		if !contains(got, "'enterprise.license'") {
+			t.Errorf("expected 'enterprise.license' in SELECT, got %q", got)
+		}
+		// Must contain the redaction placeholder
+		if !contains(got, "'<redacted>'") {
+			t.Errorf("expected '<redacted>' in SELECT, got %q", got)
+		}
+		// Non-redacted columns must appear as plain identifiers
+		if !contains(got, `"variable"`) {
+			t.Errorf("expected \"variable\" column in SELECT, got %q", got)
+		}
+		if !contains(got, `"type"`) {
+			t.Errorf("expected \"type\" column in SELECT, got %q", got)
+		}
+	})
+
+	t.Run("single-quote in key is escaped", func(t *testing.T) {
+		table := Table{
+			RedactColumn:    "value",
+			RedactKeyColumn: "variable",
+			RedactedKeys:    []string{"it's.a.key"},
+		}
+		got := buildSelectExpr(columns, table)
+		if !contains(got, "'it''s.a.key'") {
+			t.Errorf("expected escaped single-quote in SELECT, got %q", got)
+		}
+	})
+}
+
+func contains(s, substr string) bool {
+	return strings.Contains(s, substr)
 }
 
 func TestIsVirtualClusterError(t *testing.T) {

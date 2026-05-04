@@ -36,7 +36,10 @@ const (
 	// such as gossip_nodes. Auto-detection occurs on first failure.
 	TenantScopeSystem TenantScope = "system"
 	// TenantScopeBoth routes the query to both virtual clusters.
-	// Reserved for future use (e.g., cluster settings available in both tenants).
+	// The main virtual cluster is always exported. In virtualized clusters, the system
+	// virtual cluster is also exported with a ".system" filename suffix (e.g.,
+	// crdb_internal.cluster_settings.system.csv). The system export is best-effort: if the
+	// system connection cannot be established, it is skipped with a warning.
 	TenantScopeBoth TenantScope = "both"
 )
 
@@ -103,6 +106,33 @@ type Table struct {
 	// Scope indicates which virtual cluster connection to use for this table.
 	// Defaults to TenantScopeMain when unset.
 	Scope TenantScope
+	// RedactKeyColumn is the column used to identify rows whose sensitive column should be redacted.
+	// Set together with RedactColumn and RedactedKeys.
+	RedactKeyColumn string
+	// RedactColumn is the column whose value is replaced with "<redacted>" for matching rows.
+	RedactColumn string
+	// RedactedKeys is the set of RedactKeyColumn values for which RedactColumn is redacted.
+	RedactedKeys []string
+}
+
+// sensitiveClusterSettings is the list of cluster setting names whose values are
+// redacted in the export to avoid leaking secrets or credentials.
+var sensitiveClusterSettings = []string{
+	// Sensitive settings (contain credentials, keys, or PEM data)
+	"server.host_based_authentication.configuration",
+	"server.identity_map.configuration",
+	"server.jwt_authentication.issuers.custom_ca",
+	"server.ldap_authentication.domain.custom_ca",
+	"server.ldap_authentication.client.tls_certificate",
+	"server.ldap_authentication.client.tls_key",
+	"server.oidc_authentication.client_id",
+	"server.oidc_authentication.client_secret",
+	"server.oidc_authentication.provider.custom_ca",
+	"sql.override.allow_unsafe_internals.enabled",
+	// Non-reportable settings (always redacted in telemetry)
+	"cluster.secret",
+	"cluster.label",
+	"enterprise.license",
 }
 
 var exportTables = []Table{
@@ -112,6 +142,24 @@ var exportTables = []Table{
 	{Database: "crdb_internal", Name: "gossip_nodes", TimeColumn: "", Optional: true, Scope: TenantScopeSystem},
 	{Database: "", Name: "crdb_internal.table_indexes", TimeColumn: "", Scope: TenantScopeMain}, // Use "" to query across all databases
 	{Database: "system", Name: "table_statistics", TimeColumn: "", Scope: TenantScopeMain},
+	{
+		Database:        "crdb_internal",
+		Name:            "cluster_settings",
+		TimeColumn:      "",
+		Scope:           TenantScopeBoth,
+		RedactKeyColumn: "variable",
+		RedactColumn:    "value",
+		RedactedKeys:    sensitiveClusterSettings,
+	},
+	{
+		Database:        "system",
+		Name:            "settings",
+		TimeColumn:      "",
+		Scope:           TenantScopeBoth,
+		RedactKeyColumn: "name",
+		RedactColumn:    "value",
+		RedactedKeys:    sensitiveClusterSettings,
+	},
 }
 
 // NewExporter creates a new Exporter instance with the given configuration.
@@ -188,8 +236,11 @@ func (exporter *Exporter) Close() error {
 //   - Database schemas (CREATE statements for all user databases)
 //   - Zone configurations
 //   - Statistics tables (statement_statistics, transaction_statistics, transaction_contention_events, gossip_nodes, table_indexes across all databases, system.table_statistics)
+//   - Cluster settings (crdb_internal.cluster_settings, system.settings) with sensitive values redacted
 //
 // The statistics tables are filtered by the TimeRange specified in Config.
+// In virtualized clusters, tables with TenantScopeBoth are exported once per virtual cluster,
+// with the system virtual cluster export using a ".system" filename suffix.
 // All exported data is written to the OutputFile specified in Config.
 //
 // Returns an error if any step of the export process fails.
@@ -474,11 +525,27 @@ func (exporter *Exporter) userDatabases() ([]string, error) {
 // exportTable routes the table export to the appropriate virtual cluster connection
 // based on the table's Scope. For TenantScopeSystem tables, it first attempts the
 // export using the main connection; if CockroachDB returns a virtual cluster error,
-// it establishes a system connection and retries automatically.
+// it establishes a system connection and retries automatically. For TenantScopeBoth
+// tables, the main virtual cluster is always exported, and the system virtual cluster
+// is exported with a ".system" filename suffix when in virtualized cluster mode.
 func (exporter *Exporter) exportTable(ctx context.Context, dir string, table Table, aggregationInterval time.Duration) error {
 	scope := table.Scope
 	if scope == "" {
 		scope = TenantScopeMain
+	}
+
+	if scope == TenantScopeBoth {
+		// Always export from the main virtual cluster.
+		if err := exporter.doExportTable(ctx, dir, table, aggregationInterval, exporter.Db, ""); err != nil {
+			return err
+		}
+		// Also export from the system virtual cluster (best-effort).
+		systemConn, err := exporter.ensureSystemConn(ctx)
+		if err != nil {
+			logrus.WithError(err).Warnf("skipping system virtual cluster export for %s.%s (could not connect to system virtual cluster)", table.Database, table.Name)
+			return nil
+		}
+		return exporter.doExportTable(ctx, dir, table, aggregationInterval, systemConn, ".system")
 	}
 
 	conn := exporter.Db
@@ -486,25 +553,27 @@ func (exporter *Exporter) exportTable(ctx context.Context, dir string, table Tab
 		conn = exporter.SystemDb
 	}
 
-	err := exporter.doExportTable(ctx, dir, table, aggregationInterval, conn)
+	err := exporter.doExportTable(ctx, dir, table, aggregationInterval, conn, "")
 	if err != nil && scope == TenantScopeSystem && isVirtualClusterError(err) {
 		systemConn, connErr := exporter.ensureSystemConn(ctx)
 		if connErr != nil {
 			return fmt.Errorf("failed to connect to system virtual cluster: %w", connErr)
 		}
-		return exporter.doExportTable(ctx, dir, table, aggregationInterval, systemConn)
+		return exporter.doExportTable(ctx, dir, table, aggregationInterval, systemConn, "")
 	}
 	return err
 }
 
 // doExportTable performs the actual table export using the provided connection.
-func (exporter *Exporter) doExportTable(ctx context.Context, dir string, table Table, aggregationInterval time.Duration, conn *pgx.Conn) error {
+// filenameSuffix is appended before the ".csv" extension (e.g. ".system" produces
+// "crdb_internal.cluster_settings.system.csv"). Pass an empty string for no suffix.
+func (exporter *Exporter) doExportTable(ctx context.Context, dir string, table Table, aggregationInterval time.Duration, conn *pgx.Conn, filenameSuffix string) error {
 	// Create filename - if database is empty, just use table name
 	var filename string
 	if table.Database == "" {
-		filename = fmt.Sprintf("%s.csv", table.Name)
+		filename = fmt.Sprintf("%s%s.csv", table.Name, filenameSuffix)
 	} else {
-		filename = fmt.Sprintf("%s.%s.csv", table.Database, table.Name)
+		filename = fmt.Sprintf("%s.%s%s.csv", table.Database, table.Name, filenameSuffix)
 	}
 	dataFile := filepath.Join(dir, filename)
 
@@ -558,9 +627,13 @@ func (exporter *Exporter) doExportTable(ctx context.Context, dir string, table T
 			endTime(exporter.Config.TimeRange.End).Format("2006-01-02 15:04:05"),
 		)
 	}
+
+	// Build SELECT expression, applying column-level redaction when configured.
+	selectExpr := buildSelectExpr(headers, table)
+
 	copyQuery := fmt.Sprintf(
-		"COPY (SELECT * FROM %s %s) TO STDOUT WITH CSV",
-		tableRef, where)
+		"COPY (SELECT %s FROM %s %s) TO STDOUT WITH CSV",
+		selectExpr, tableRef, where)
 	logrus.Info(copyQuery)
 	_, err = conn.PgConn().CopyTo(ctx, file, copyQuery)
 	if err != nil {
@@ -568,6 +641,41 @@ func (exporter *Exporter) doExportTable(ctx context.Context, dir string, table T
 	}
 
 	return nil
+}
+
+// buildSelectExpr constructs the SELECT expression for the COPY query.
+// When the table has redaction configured, it returns an explicit column list
+// with a CASE expression that replaces the sensitive column value with "<redacted>"
+// for rows whose key column matches any entry in RedactedKeys.
+// When no redaction is configured, it returns "*".
+func buildSelectExpr(columns []string, table Table) string {
+	if table.RedactColumn == "" || len(table.RedactedKeys) == 0 {
+		return "*"
+	}
+
+	// Build the SQL IN list from the hard-coded redacted key names.
+	quotedKeys := make([]string, len(table.RedactedKeys))
+	for i, k := range table.RedactedKeys {
+		quotedKeys[i] = "'" + strings.ReplaceAll(k, "'", "''") + "'"
+	}
+	inClause := strings.Join(quotedKeys, ", ")
+
+	keyCol := pgx.Identifier{table.RedactKeyColumn}.Sanitize()
+	redactCol := pgx.Identifier{table.RedactColumn}.Sanitize()
+
+	cols := make([]string, len(columns))
+	for i, col := range columns {
+		quotedCol := pgx.Identifier{col}.Sanitize()
+		if col == table.RedactColumn {
+			cols[i] = fmt.Sprintf(
+				"CASE WHEN %s IN (%s) THEN '<redacted>' ELSE %s END AS %s",
+				keyCol, inClause, redactCol, redactCol,
+			)
+		} else {
+			cols[i] = quotedCol
+		}
+	}
+	return strings.Join(cols, ", ")
 }
 
 func (exporter *Exporter) createZipFile(sourceDir string) error {
