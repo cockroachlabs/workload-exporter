@@ -18,7 +18,9 @@
 
 2. Add or update a test in `pkg/export/exporter_test.go`.
 
-3. Build and verify:
+3. Update the "What Data is Collected" section in `README.md` to list the new CSV file.
+
+4. Build and verify:
    ```bash
    go build -o workload-exporter .
    ./workload-exporter export --help

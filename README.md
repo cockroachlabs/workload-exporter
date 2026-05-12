@@ -205,6 +205,7 @@ The export creates a **zip file** containing the following files:
 - **`crdb_internal.gossip_nodes.csv`** - Node information and topology
 - **`crdb_internal.node_cpu_mem.csv`** - Per-node vCPU count and total memory (derived from `kv_node_status`)
 - **`crdb_internal.table_indexes.csv`** - Table and index descriptor IDs across all databases
+- **`crdb_internal.index_usage_statistics.csv`** - Index usage counters across all databases
 - **`system.table_statistics.csv`** - Optimizer table statistics (column-level stats used by the query planner)
 
 *Statistics files only include data within the specified time range*
