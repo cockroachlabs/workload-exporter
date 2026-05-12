@@ -158,7 +158,8 @@ var exportTables = []Table{
 			` ROUND((metrics->>'sys.totalmem')::FLOAT / 1073741824, 1) AS total_mem_gib` +
 			` FROM crdb_internal.kv_node_status`,
 	},
-	{Database: "", Name: "crdb_internal.table_indexes", TimeColumn: "", Scope: TenantScopeMain}, // Use "" to query across all databases
+	{Database: "", Name: "crdb_internal.table_indexes", TimeColumn: "", Scope: TenantScopeMain},           // Use "" to query across all databases
+	{Database: "", Name: "crdb_internal.index_usage_statistics", TimeColumn: "", Scope: TenantScopeMain}, // Use "" to query across all databases
 	{Database: "system", Name: "table_statistics", TimeColumn: "", Scope: TenantScopeMain},
 	{
 		Database:        "crdb_internal",

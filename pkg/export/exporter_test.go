@@ -195,6 +195,24 @@ func TestExportTables(t *testing.T) {
 	}
 }
 
+func TestExportTablesIncludesIndexUsageStatistics(t *testing.T) {
+	found := false
+	for _, table := range exportTables {
+		if table.Database == "" && table.Name == "crdb_internal.index_usage_statistics" {
+			found = true
+			if table.Scope != TenantScopeMain {
+				t.Errorf("crdb_internal.index_usage_statistics should have Scope TenantScopeMain, got %q", table.Scope)
+			}
+			if table.TimeColumn != "" {
+				t.Errorf("crdb_internal.index_usage_statistics should have no TimeColumn, got %q", table.TimeColumn)
+			}
+		}
+	}
+	if !found {
+		t.Error("exportTables should contain crdb_internal.index_usage_statistics")
+	}
+}
+
 func TestExportTablesIncludesNodeCPUMem(t *testing.T) {
 	found := false
 	for _, table := range exportTables {
