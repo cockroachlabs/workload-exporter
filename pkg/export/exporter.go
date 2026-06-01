@@ -498,20 +498,29 @@ func (exporter *Exporter) createStatements(db string) ([]string, error) {
 		return creates, err
 	}
 
-	rows, err := exporter.Db.Query(context.Background(), "SELECT create_statement FROM [SHOW CREATE ALL TABLES]")
-
-	if err != nil {
-		return creates, err
+	// Run in dependency order so the output can be replayed as-is.
+	queries := []string{
+		"SELECT create_statement FROM [SHOW CREATE ALL SCHEMAS]",
+		"SELECT create_statement FROM [SHOW CREATE ALL TYPES]",
+		"SELECT create_statement FROM [SHOW CREATE ALL TABLES]",
+		"SELECT create_statement FROM [SHOW CREATE ALL ROUTINES]",
+		"SELECT create_statement FROM [SHOW CREATE ALL TRIGGERS]",
 	}
-	defer rows.Close()
 
-	for rows.Next() {
-		var create string
-		err := rows.Scan(&create)
+	for _, query := range queries {
+		rows, err := exporter.Db.Query(context.Background(), query)
 		if err != nil {
-			return nil, err
+			return creates, err
 		}
-		creates = append(creates, create)
+		for rows.Next() {
+			var create string
+			if err := rows.Scan(&create); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			creates = append(creates, create)
+		}
+		rows.Close()
 	}
 
 	return creates, nil
