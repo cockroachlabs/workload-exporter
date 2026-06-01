@@ -498,18 +498,27 @@ func (exporter *Exporter) createStatements(db string) ([]string, error) {
 		return creates, err
 	}
 
-	// Run in dependency order so the output can be replayed as-is.
-	queries := []string{
-		"SELECT create_statement FROM [SHOW CREATE ALL SCHEMAS]",
-		"SELECT create_statement FROM [SHOW CREATE ALL TYPES]",
-		"SELECT create_statement FROM [SHOW CREATE ALL TABLES]",
-		"SELECT create_statement FROM [SHOW CREATE ALL ROUTINES]",
-		"SELECT create_statement FROM [SHOW CREATE ALL TRIGGERS]",
+	type schemaQuery struct {
+		sql      string
+		optional bool // optional queries are skipped with a warning on older clusters
 	}
 
-	for _, query := range queries {
-		rows, err := exporter.Db.Query(context.Background(), query)
+	// Run in dependency order so the output can be replayed as-is.
+	queries := []schemaQuery{
+		{"SELECT create_statement FROM [SHOW CREATE ALL SCHEMAS]", false},
+		{"SELECT create_statement FROM [SHOW CREATE ALL TYPES]", false},
+		{"SELECT create_statement FROM [SHOW CREATE ALL TABLES]", false},
+		{"SELECT create_statement FROM [SHOW CREATE ALL ROUTINES]", true}, // v22.2+
+		{"SELECT create_statement FROM [SHOW CREATE ALL TRIGGERS]", true}, // v23.1+
+	}
+
+	for _, q := range queries {
+		rows, err := exporter.Db.Query(context.Background(), q.sql)
 		if err != nil {
+			if q.optional {
+				logrus.WithError(err).Debugf("skipping unsupported schema query for database %s: %s", db, q.sql)
+				continue
+			}
 			return creates, err
 		}
 		for rows.Next() {
