@@ -90,6 +90,7 @@ type Metadata struct {
 	SqlStatsAggregationInterval time.Duration `json:"sql.stats.aggregation.interval"`
 	SqlStatsFlushInterval       time.Duration `json:"sql.stats.flush.interval"`
 	VirtualCluster              bool          `json:"virtual_cluster"`
+	ASH                         ASHInfo       `json:"ash"`
 }
 
 // Table represents a CockroachDB table to be exported with optional time-based filtering.
@@ -256,6 +257,7 @@ func (exporter *Exporter) Close() error {
 //   - Zone configurations
 //   - Statistics tables (statement_statistics, transaction_statistics, transaction_contention_events, gossip_nodes, node_cpu_mem, table_indexes across all databases, system.table_statistics)
 //   - Cluster settings (crdb_internal.cluster_settings, system.settings) with sensitive values redacted
+//   - Active session history, when the cluster provides it (see ash.go)
 //
 // The statistics tables are filtered by the TimeRange specified in Config.
 // In virtualized clusters, tables with TenantScopeBoth are exported once per virtual cluster,
@@ -348,8 +350,13 @@ func (exporter *Exporter) Export() error {
 		return fmt.Errorf("failed to export all zone configurations: %w", err)
 	}
 
+	// Active session history is only available on clusters that support it, so the
+	// tables to export are determined per cluster.
+	metadata.ASH = exporter.detectASH(ctx)
+	tables := append(slices.Clone(exportTables), ashTablesFor(metadata.ASH.Views)...)
+
 	logrus.Info("starting table export")
-	for _, table := range exportTables {
+	for _, table := range tables {
 		logrus.Infof(" exporting table '%s.%s'", table.Database, table.Name)
 		if err := exporter.exportTable(ctx, tempDir, table, agg); err != nil {
 			if table.Optional {

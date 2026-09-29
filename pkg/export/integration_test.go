@@ -33,6 +33,7 @@ func TestCrossVersionCompatibility(t *testing.T) {
 		"v25.4.3",
 		"v26.1.0-beta.3",
 		"v26.2.0-beta.3",
+		"v26.3.0", // first version with persisted active session history
 	}
 
 	for _, version := range versions {
@@ -198,7 +199,45 @@ func validateExport(t *testing.T, zipPath string, version string) {
 		require.True(t, found, "Expected file not found in export: %s (version %s)", filename, version)
 	}
 
+	validateASHExport(t, &zipReader.Reader, version)
+
 	t.Logf("✓ All expected files validated for version %s", version)
+}
+
+// validateASHExport checks that the active session history export matches what the
+// cluster reported: one CSV per detected view, and no ASH files at all on versions
+// without ASH.
+func validateASHExport(t *testing.T, zipReader *zip.Reader, version string) {
+	names := make(map[string]bool, len(zipReader.File))
+	var metadata Metadata
+	for _, file := range zipReader.File {
+		names[file.Name] = true
+		if file.Name != "metadata.json" {
+			continue
+		}
+		rc, err := file.Open()
+		require.NoError(t, err, "Should be able to open metadata.json")
+		err = json.NewDecoder(rc).Decode(&metadata)
+		rc.Close()
+		require.NoError(t, err, "metadata.json should be valid JSON")
+	}
+
+	if !metadata.ASH.Available {
+		t.Logf("  Active session history not available in %s", version)
+		for name := range names {
+			require.NotContains(t, name, "active_session_history",
+				"Export should not contain ASH data when the cluster has no ASH (version %s)", version)
+		}
+		return
+	}
+
+	require.NotEmpty(t, metadata.ASH.Views, "ASH metadata should list the exported views (version %s)", version)
+	for _, view := range metadata.ASH.Views {
+		filename := fmt.Sprintf("%s.%s.csv", ashSchema, view)
+		require.True(t, names[filename], "Expected ASH file not found in export: %s (version %s)", filename, version)
+		t.Logf("  ✓ Found ASH export: %s", filename)
+	}
+	require.NotZero(t, metadata.ASH.SampleInterval, "ASH metadata should record obs.ash.sample_interval (version %s)", version)
 }
 
 // validateCSVFile ensures a CSV file has a header row

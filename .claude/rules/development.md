@@ -26,6 +26,23 @@
    ./workload-exporter export --help
    ```
 
+### Adding a Version-Dependent Export Table
+
+Some relations only exist in newer CockroachDB versions (e.g. the Active Session History
+views added in 26.2/26.3). Do **not** put these in `exportTables` and rely on `Optional`
+alone — probe for them instead, so the log says "not supported" rather than "failed":
+
+1. Probe `information_schema.tables` for the relation and build the `Table` list from the
+   result. See `detectASH` / `ashTablesFor` in `pkg/export/ash.go`.
+2. Append the detected tables to `exportTables` in `Export()` — do not mutate the package
+   variable.
+3. Record what was detected in `Metadata` so consumers know whether the data is absent
+   because the cluster lacks the feature or because it had no rows.
+4. Prefer `information_schema` relations over `crdb_internal` ones: they are supported
+   interfaces and do not require `allow_unsafe_internals` in 26.1+.
+5. Verify against local CockroachDB binaries for a version that has the feature and one
+   that does not.
+
 ### Adding a New CLI Command
 
 1. Create a new file in `cmd/` (e.g. `cmd/mycommand.go`).

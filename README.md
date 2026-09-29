@@ -195,7 +195,7 @@ Flags:
 The export creates a **zip file** containing the following files:
 
 ### Metadata
-- **`metadata.json`** - Cluster version, ID, name, organization, export configuration, and whether the cluster is a virtual cluster
+- **`metadata.json`** - Cluster version, ID, name, organization, export configuration, whether the cluster is a virtual cluster, and Active Session History availability and settings (`ash`)
   - ⚠️ Note: Connection string password is automatically redacted
 
 ### Statistics (CSV format, time-filtered)
@@ -209,6 +209,21 @@ The export creates a **zip file** containing the following files:
 - **`system.table_statistics.csv`** - Optimizer table statistics (column-level stats used by the query planner)
 
 *Statistics files only include data within the specified time range*
+
+### Active Session History (CockroachDB 26.2+, CSV format, time-filtered)
+
+Active Session History (ASH) samples what active sessions are doing and what each sample was waiting on. It is exported only when the cluster provides it — the exporter probes for the ASH views rather than assuming a version, and clusters without ASH are skipped with a log message.
+
+- **`information_schema.crdb_persisted_active_session_history.csv`** - Persisted ASH samples (CockroachDB 26.3+), retained for `obs.ash.compaction.retention_period` (7 days by default)
+- **`information_schema.crdb_cluster_active_session_history.csv`** - Cluster-wide in-memory ASH samples (CockroachDB 26.2+), including recent samples not yet flushed to the persisted table
+
+`metadata.json` records what was found under the `ash` key, including `obs.ash.enabled`, `obs.ash.enrichment.enabled`, and `obs.ash.sample_interval` (the interval each sample represents).
+
+Notes:
+- ASH sampling is off by default in 26.2 (`obs.ash.enabled`) and on by default in 26.3. When it is off, the exported files contain only a header row and the exporter logs a warning.
+- Statement text in ASH is a fingerprint, with literals replaced by `_`, the same form used in `crdb_internal.statement_statistics`.
+- Per-execution columns (`user`, `plan_gist`, `canary_stats`, `txn_id`, `session_id`) are populated only when `obs.ash.enrichment.enabled` is set.
+- ASH is sampled every second per active session, so a wide time range on a busy cluster can produce a large export. Narrow `--start`/`--end` if export size is a concern.
 
 ### Schema Information
 - **`[database_name].schema.txt`** - CREATE statements for all tables in each database

@@ -8,6 +8,8 @@ The workload-exporter tool supports **CockroachDB 24.1 and later**.
 
 | CockroachDB Version | Support Status | Notes |
 |---------------------|----------------|-------|
+| 26.3.x | ✅ Supported | Adds persisted Active Session History export |
+| 26.2.x | ✅ Supported | Adds in-memory Active Session History export |
 | 26.1.x | ✅ Supported | Requires automatic `allow_unsafe_internals` enablement |
 | 25.4.x | ✅ Supported | Fully tested |
 | 25.2.x | ✅ Supported | Fully tested |
@@ -17,6 +19,26 @@ The workload-exporter tool supports **CockroachDB 24.1 and later**.
 | < 24.1 | ⚠️  May work | Not tested, not officially supported |
 
 ## Version-Specific Behavior
+
+### CockroachDB 26.2+ / 26.3+
+
+**Change:** Introduction of Active Session History (ASH)
+
+ASH samples what active sessions are doing and what each sample was waiting on. The exporter exports it when the cluster provides it:
+
+| Relation | Available from | Contents |
+|----------|----------------|----------|
+| `information_schema.crdb_cluster_active_session_history` | 26.2 | Cluster-wide in-memory samples |
+| `information_schema.crdb_persisted_active_session_history` | 26.3 | Samples persisted to `system.active_session_history` |
+
+**Impact:** No user action is required. On clusters without ASH the export is unchanged, apart from an informational log line.
+
+**Technical Details:**
+- Availability is detected by probing `information_schema.tables` for the ASH views, not by parsing the cluster version, so the export adapts to backports and to clusters where ASH is unavailable.
+- The `information_schema` views are used in preference to the equivalent `crdb_internal` views because they are the supported interface and do not require `allow_unsafe_internals`.
+- Both exports are filtered on `sample_time` using the configured time range, and both are optional: if a view exists but cannot be read, the export logs a warning and continues.
+- `metadata.json` records ASH availability and the relevant `obs.ash.*` settings under the `ash` key.
+- `obs.ash.enabled` defaults to `false` in 26.2 and `true` in 26.3. When sampling is disabled the exported CSVs contain only a header row.
 
 ### CockroachDB 26.1+
 
@@ -44,6 +66,8 @@ The workload-exporter includes comprehensive integration tests that validate fun
 - v25.2.11
 - v25.4.3
 - v26.1.0-beta.3
+- v26.2.0-beta.3
+- v26.3.0
 
 See [TESTING.md](TESTING.md) for details on running integration tests.
 
