@@ -6,9 +6,8 @@ import (
 	"archive/zip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"github.com/jackc/pgx/v4"
-	"github.com/sirupsen/logrus"
 	"io"
 	"net/url"
 	"os"
@@ -16,6 +15,10 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgconn"
+	"github.com/jackc/pgx/v4"
+	"github.com/sirupsen/logrus"
 )
 
 // ExporterVersion is the current version of the exporter tool.
@@ -158,7 +161,7 @@ var exportTables = []Table{
 			` ROUND((metrics->>'sys.totalmem')::FLOAT / 1073741824, 1) AS total_mem_gib` +
 			` FROM crdb_internal.kv_node_status`,
 	},
-	{Database: "", Name: "crdb_internal.table_indexes", TimeColumn: "", Scope: TenantScopeMain},           // Use "" to query across all databases
+	{Database: "", Name: "crdb_internal.table_indexes", TimeColumn: "", Scope: TenantScopeMain},          // Use "" to query across all databases
 	{Database: "", Name: "crdb_internal.index_usage_statistics", TimeColumn: "", Scope: TenantScopeMain}, // Use "" to query across all databases
 	{Database: "system", Name: "table_statistics", TimeColumn: "", Scope: TenantScopeMain},
 	{
@@ -254,7 +257,8 @@ func (exporter *Exporter) Close() error {
 //   - Cluster metadata (version, ID, name, organization, settings)
 //   - Database schemas (CREATE statements for all user databases)
 //   - Zone configurations
-//   - Statistics tables (statement_statistics, transaction_statistics, transaction_contention_events, gossip_nodes, node_cpu_mem, table_indexes across all databases, system.table_statistics)
+// - Statistics tables (statement_statistics, transaction_statistics, transaction_contention_events, gossip_nodes, node_cpu_mem, table_indexes across all
+// databases, system.table_statistics)
 //   - Cluster settings (crdb_internal.cluster_settings, system.settings) with sensitive values redacted
 //
 // The statistics tables are filtered by the TimeRange specified in Config.
@@ -471,7 +475,9 @@ func (exporter *Exporter) exportAllZoneConfigurations(ctx context.Context, tempD
 
 }
 
-func (exporter *Exporter) exportCreateStatements(ctx context.Context, db string, tempDir string) error {
+func (exporter *Exporter) exportCreateStatements(
+	ctx context.Context, db string, tempDir string,
+) error {
 
 	filename := fmt.Sprintf("%s.schema.txt", db)
 	dataFile := filepath.Join(tempDir, filename)
@@ -498,23 +504,78 @@ func (exporter *Exporter) createStatements(db string) ([]string, error) {
 		return creates, err
 	}
 
-	rows, err := exporter.Db.Query(context.Background(), "SELECT create_statement FROM [SHOW CREATE ALL TABLES]")
+	type schemaQuery struct {
+		sql      string
+		optional bool // optional queries are skipped with a warning on older clusters
+	}
 
+	// Run in dependency order so the output can be replayed as-is.
+	queries := []schemaQuery{
+		{"SELECT create_statement FROM [SHOW CREATE ALL SCHEMAS]", false},
+		{"SELECT create_statement FROM [SHOW CREATE ALL TYPES]", false},
+		{"SELECT create_statement FROM [SHOW CREATE ALL TABLES]", false},
+		{"SELECT create_statement FROM [SHOW CREATE ALL ROUTINES]", true}, // v25.3+
+		{"SELECT create_statement FROM [SHOW CREATE ALL TRIGGERS]", true}, // v25.3+
+	}
+
+	for _, q := range queries {
+		results, err := exporter.queryCreateStatements(q.sql)
+		if err != nil {
+			if q.optional && isUnsupportedStatement(err) {
+				logrus.WithError(err).Warnf("skipping schema query unsupported by this cluster version for database %s: %s", db, q.sql)
+				continue
+			}
+			return creates, err
+		}
+		creates = append(creates, results...)
+	}
+
+	return creates, nil
+
+}
+
+// queryCreateStatements returns the create_statement column of every row
+// produced by sql. rows.Err is checked alongside the error from Query: a
+// failure that interrupts iteration -- a connection dropped partway through a
+// large schema, say -- otherwise looks identical to a query that simply ran
+// out of rows, silently truncating the exported schema.
+func (exporter *Exporter) queryCreateStatements(sql string) ([]string, error) {
+
+	rows, err := exporter.Db.Query(context.Background(), sql)
 	if err != nil {
-		return creates, err
+		return nil, err
 	}
 	defer rows.Close()
 
+	var creates []string
+
 	for rows.Next() {
 		var create string
-		err := rows.Scan(&create)
-		if err != nil {
+		if err := rows.Scan(&create); err != nil {
 			return nil, err
 		}
 		creates = append(creates, create)
 	}
 
-	return creates, nil
+	return creates, rows.Err()
+
+}
+
+// isUnsupportedStatement reports whether err is the server rejecting a
+// statement this cluster version does not know, as opposed to a genuine
+// failure. SHOW CREATE ALL ROUTINES and ... ALL TRIGGERS were added in v25.3,
+// and older clusters cannot parse them at all, so the rejection arrives as a
+// syntax error rather than as feature_not_supported. Distinguishing the two
+// keeps a dropped connection or a permission error from being mistaken for an
+// old cluster and quietly omitting routines and triggers from the export.
+func isUnsupportedStatement(err error) bool {
+
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+
+	return pgErr.Code == "42601" || pgErr.Code == "0A000" // syntax_error, feature_not_supported
 
 }
 
@@ -547,7 +608,9 @@ func (exporter *Exporter) userDatabases() ([]string, error) {
 // it establishes a system connection and retries automatically. For TenantScopeBoth
 // tables, the main virtual cluster is always exported, and the system virtual cluster
 // is exported with a ".system" filename suffix when in virtualized cluster mode.
-func (exporter *Exporter) exportTable(ctx context.Context, dir string, table Table, aggregationInterval time.Duration) error {
+func (exporter *Exporter) exportTable(
+	ctx context.Context, dir string, table Table, aggregationInterval time.Duration,
+) error {
 	scope := table.Scope
 	if scope == "" {
 		scope = TenantScopeMain
@@ -586,7 +649,14 @@ func (exporter *Exporter) exportTable(ctx context.Context, dir string, table Tab
 // doExportTable performs the actual table export using the provided connection.
 // filenameSuffix is appended before the ".csv" extension (e.g. ".system" produces
 // "crdb_internal.cluster_settings.system.csv"). Pass an empty string for no suffix.
-func (exporter *Exporter) doExportTable(ctx context.Context, dir string, table Table, aggregationInterval time.Duration, conn *pgx.Conn, filenameSuffix string) error {
+func (exporter *Exporter) doExportTable(
+	ctx context.Context,
+	dir string,
+	table Table,
+	aggregationInterval time.Duration,
+	conn *pgx.Conn,
+	filenameSuffix string,
+) error {
 	// Create filename - if database is empty, just use table name
 	var filename string
 	if table.Database == "" {

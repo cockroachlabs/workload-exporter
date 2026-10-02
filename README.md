@@ -211,7 +211,7 @@ The export creates a **zip file** containing the following files:
 *Statistics files only include data within the specified time range*
 
 ### Schema Information
-- **`[database_name].schema.txt`** - CREATE statements for all tables in each database
+- **`[database_name].schema.txt`** - CREATE statements for each database: schemas, types, and tables, plus routines and triggers on CockroachDB v25.3 and later
   - One file per user database (system databases excluded)
 
 ### Configuration

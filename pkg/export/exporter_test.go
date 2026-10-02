@@ -1,10 +1,13 @@
 package export
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgconn"
 )
 
 func TestCleanConnectionString(t *testing.T) {
@@ -548,6 +551,61 @@ func TestParseMajorVersion(t *testing.T) {
 				if major != tt.expected {
 					t.Errorf("parseMajorVersion() = %d, want %d", major, tt.expected)
 				}
+			}
+		})
+	}
+}
+
+func TestIsUnsupportedStatement(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			// What a pre-v25.3 cluster actually returns for SHOW CREATE ALL ROUTINES.
+			name:     "syntax error from unsupported SHOW CREATE variant",
+			err:      &pgconn.PgError{Code: "42601", Message: `at or near "routines": syntax error`},
+			expected: true,
+		},
+		{
+			name:     "feature not supported",
+			err:      &pgconn.PgError{Code: "0A000", Message: "unimplemented"},
+			expected: true,
+		},
+		{
+			// Must not be mistaken for an old cluster: the routines really exist
+			// and silently omitting them would corrupt the export.
+			name:     "insufficient privilege",
+			err:      &pgconn.PgError{Code: "42501", Message: "permission denied"},
+			expected: false,
+		},
+		{
+			name:     "connection failure",
+			err:      &pgconn.PgError{Code: "08006", Message: "connection failure"},
+			expected: false,
+		},
+		{
+			name:     "wrapped syntax error",
+			err:      fmt.Errorf("querying schema: %w", &pgconn.PgError{Code: "42601"}),
+			expected: true,
+		},
+		{
+			name:     "non-postgres error",
+			err:      errors.New("context deadline exceeded"),
+			expected: false,
+		},
+		{
+			name:     "nil error",
+			err:      nil,
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isUnsupportedStatement(tt.err); got != tt.expected {
+				t.Errorf("isUnsupportedStatement(%v) = %v, want %v", tt.err, got, tt.expected)
 			}
 		})
 	}
