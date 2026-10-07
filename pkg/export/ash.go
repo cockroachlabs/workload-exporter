@@ -2,10 +2,13 @@ package export
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
+	"github.com/jackc/pgconn"
 	"github.com/sirupsen/logrus"
 )
 
@@ -95,9 +98,10 @@ type ASHInfo struct {
 	// this many per node. Nil when the cluster has no in-memory view or it could not be read.
 	ResponseLimit *int64 `json:"response_limit,omitempty"`
 	// BufferSize is the value of obs.ash.buffer_size: the per-node in-memory sample ring
-	// capacity, bounding how far back the cluster view can reach at all. Zero means the
-	// cluster auto-sizes it from the Go soft memory limit. Nil when the cluster has no
-	// in-memory view or it could not be read.
+	// capacity, bounding how far back the cluster view can reach at all. Some versions
+	// accept 0 to mean "auto-size from available memory", in which case the effective
+	// capacity is not this value. Nil when the cluster has no in-memory view or it could
+	// not be read.
 	BufferSize *int64 `json:"buffer_size,omitempty"`
 	// Views lists the ASH views detected in the cluster catalog, in export order.
 	Views []string `json:"views,omitempty"`
@@ -131,7 +135,7 @@ func (exporter *Exporter) detectASH(ctx context.Context) ASHInfo {
 	logrus.Infof("detected active session history views: %v", views)
 
 	if enabled, err := exporter.boolClusterSetting(ctx, "obs.ash.enabled"); err != nil {
-		logrus.WithError(err).Warn("failed to read obs.ash.enabled; recording it as unknown in metadata")
+		logSettingReadErr("obs.ash.enabled", err)
 	} else {
 		info.Enabled = &enabled
 		if !enabled {
@@ -140,20 +144,20 @@ func (exporter *Exporter) detectASH(ctx context.Context) ASHInfo {
 	}
 
 	if enriched, err := exporter.boolClusterSetting(ctx, "obs.ash.enrichment.enabled"); err != nil {
-		logrus.WithError(err).Warn("failed to read obs.ash.enrichment.enabled; recording it as unknown in metadata")
+		logSettingReadErr("obs.ash.enrichment.enabled", err)
 	} else {
 		info.EnrichmentEnabled = &enriched
 	}
 
 	if interval, err := exporter.durationClusterSetting(ctx, "obs.ash.sample_interval"); err != nil {
-		logrus.WithError(err).Warn("failed to read obs.ash.sample_interval; recording it as unknown in metadata")
+		logSettingReadErr("obs.ash.sample_interval", err)
 	} else {
 		info.SampleInterval = interval
 	}
 
 	if slices.Contains(views, ashPersistedView) {
 		if retention, err := exporter.durationClusterSetting(ctx, "obs.ash.compaction.retention_period"); err != nil {
-			logrus.WithError(err).Warn("failed to read obs.ash.compaction.retention_period; recording it as unknown in metadata")
+			logSettingReadErr("obs.ash.compaction.retention_period", err)
 		} else {
 			info.RetentionPeriod = retention
 		}
@@ -163,13 +167,13 @@ func (exporter *Exporter) detectASH(ctx context.Context) ASHInfo {
 	// CSV from a cluster that genuinely had no activity in the window.
 	if slices.Contains(views, ashClusterView) {
 		if limit, err := exporter.intClusterSetting(ctx, "obs.ash.response_limit"); err != nil {
-			logrus.WithError(err).Warn("failed to read obs.ash.response_limit; recording it as unknown in metadata")
+			logSettingReadErr("obs.ash.response_limit", err)
 		} else {
 			info.ResponseLimit = &limit
 		}
 
 		if size, err := exporter.intClusterSetting(ctx, "obs.ash.buffer_size"); err != nil {
-			logrus.WithError(err).Warn("failed to read obs.ash.buffer_size; recording it as unknown in metadata")
+			logSettingReadErr("obs.ash.buffer_size", err)
 		} else {
 			info.BufferSize = &size
 		}
@@ -263,6 +267,28 @@ func ashTablesFor(views []string) []Table {
 		}
 	}
 	return tables
+}
+
+// logSettingReadErr reports a cluster setting that could not be read. Several obs.ash.*
+// settings were only introduced in v26.3, so a v26.2 cluster legitimately has no
+// obs.ash.enrichment.enabled: that is a version difference worth noting, not a fault to
+// warn about. Either way the value is left nil rather than recorded as its zero value.
+func logSettingReadErr(name string, err error) {
+	if isUnknownSettingErr(err) {
+		logrus.Infof("cluster setting %s is not defined in this CockroachDB version; recording it as unknown in metadata", name)
+		return
+	}
+	logrus.WithError(err).Warnf("failed to read %s; recording it as unknown in metadata", name)
+}
+
+// isUnknownSettingErr reports whether err is the cluster rejecting a setting name it
+// does not know, as opposed to a connection or permission failure.
+func isUnknownSettingErr(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return strings.Contains(pgErr.Message, "unknown setting")
 }
 
 // boolClusterSetting reads a boolean cluster setting. The setting name is interpolated

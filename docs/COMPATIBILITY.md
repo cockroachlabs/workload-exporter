@@ -41,6 +41,23 @@ ASH samples what active sessions are doing and what each sample was waiting on. 
 - `metadata.json` records ASH availability and the relevant `obs.ash.*` settings under the `ash` key. Settings that could not be read are recorded as `null`, distinguishing them from a cluster that reported `false`.
 - `obs.ash.enabled` defaults to `false` in 26.2 and `true` in 26.3. When sampling is disabled the exported CSVs contain only a header row.
 
+**Which `obs.ash.*` settings exist per version.** Several settings arrived with the persisted ASH work in 26.3, so a 26.2 cluster legitimately has no value for them. The exporter records those as `null` and logs an informational line rather than a warning, since their absence is a version difference and not a fault. Verified against v26.2.0-beta.3, v26.2.0, v26.2.1 and v26.3.0:
+
+| Setting | 26.2 | 26.3 | 26.3 default |
+|---------|------|------|--------------|
+| `obs.ash.enabled` | ✅ (default `false`) | ✅ | `true` |
+| `obs.ash.sample_interval` | ✅ | ✅ | `1s` |
+| `obs.ash.response_limit` | ✅ | ✅ | `10000` |
+| `obs.ash.buffer_size` | ✅ | ✅ | `1000000` |
+| `obs.ash.enrichment.enabled` | ❌ absent | ✅ | `false` |
+| `obs.ash.compaction.retention_period` | ❌ absent | ✅ | `168h` (7 days) |
+| `obs.ash.flush.interval` | ❌ absent | ✅ | `10m` |
+
+Two consequences for reading an export:
+
+- The per-execution ASH columns (`user`, `plan_gist`, `canary_stats`, `txn_id`, `session_id`) are **always NULL on 26.2**, because enrichment does not exist there. On 26.3 they are NULL unless the cluster explicitly enabled `obs.ash.enrichment.enabled`, which is off by default.
+- `retention_period` is absent from `metadata.json` on 26.2. This is expected: there is no persisted ASH to retain.
+
 **26.2 limitation — the in-memory view cannot serve historical ranges.**
 
 On 26.2 the in-memory cluster view is the only ASH source. It is populated by an RPC fan-out in which each node returns its newest `obs.ash.response_limit` samples (10,000 by default); the `sample_time` predicate is applied by the SQL layer *after* that cap, not pushed down into the fan-out. The cap is therefore a hard horizon rather than a limit within the requested window:
