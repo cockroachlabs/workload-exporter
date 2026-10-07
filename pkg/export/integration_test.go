@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -205,11 +206,12 @@ func validateExport(t *testing.T, zipPath string, version string) {
 }
 
 // validateASHExport checks that the active session history export matches what the
-// cluster reported: one CSV per detected view, and no ASH files at all on versions
-// without ASH.
+// cluster reported: one CSV per exported view, no file for a view that was detected but
+// failed to export, and no ASH files at all on versions without ASH.
 func validateASHExport(t *testing.T, zipReader *zip.Reader, version string) {
 	names := make(map[string]bool, len(zipReader.File))
 	var metadata Metadata
+	foundMetadata := false
 	for _, file := range zipReader.File {
 		names[file.Name] = true
 		if file.Name != "metadata.json" {
@@ -220,7 +222,12 @@ func validateASHExport(t *testing.T, zipReader *zip.Reader, version string) {
 		err = json.NewDecoder(rc).Decode(&metadata)
 		rc.Close()
 		require.NoError(t, err, "metadata.json should be valid JSON")
+		foundMetadata = true
 	}
+	// Without this, a dropped metadata.json would leave the struct zero-valued and send
+	// every version down the "no ASH" branch, which asserts almost nothing.
+	require.True(t, foundMetadata,
+		"metadata.json must be present to validate the ASH export (version %s)", version)
 
 	if !metadata.ASH.Available {
 		t.Logf("  Active session history not available in %s", version)
@@ -231,13 +238,28 @@ func validateASHExport(t *testing.T, zipReader *zip.Reader, version string) {
 		return
 	}
 
-	require.NotEmpty(t, metadata.ASH.Views, "ASH metadata should list the exported views (version %s)", version)
-	for _, view := range metadata.ASH.Views {
+	require.NotEmpty(t, metadata.ASH.Views, "ASH metadata should list the detected views (version %s)", version)
+	require.NotEmpty(t, metadata.ASH.ExportedViews, "ASH metadata should list the exported views (version %s)", version)
+
+	for _, view := range metadata.ASH.ExportedViews {
 		filename := fmt.Sprintf("%s.%s.csv", ashSchema, view)
 		require.True(t, names[filename], "Expected ASH file not found in export: %s (version %s)", filename, version)
 		t.Logf("  ✓ Found ASH export: %s", filename)
 	}
+
+	// A view that was detected but not exported must leave no partial file behind, or
+	// consumers cannot tell a failed read from a window with no samples.
+	for _, view := range metadata.ASH.Views {
+		if slices.Contains(metadata.ASH.ExportedViews, view) {
+			continue
+		}
+		filename := fmt.Sprintf("%s.%s.csv", ashSchema, view)
+		require.False(t, names[filename],
+			"ASH view %s failed to export but left %s behind (version %s)", view, filename, version)
+	}
+
 	require.NotZero(t, metadata.ASH.SampleInterval, "ASH metadata should record obs.ash.sample_interval (version %s)", version)
+	require.NotNil(t, metadata.ASH.Enabled, "ASH metadata should record obs.ash.enabled, not leave it unknown (version %s)", version)
 }
 
 // validateCSVFile ensures a CSV file has a header row

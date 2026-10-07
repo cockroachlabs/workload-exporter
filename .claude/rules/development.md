@@ -37,10 +37,25 @@ alone — probe for them instead, so the log says "not supported" rather than "f
 2. Append the detected tables to `exportTables` in `Export()` — do not mutate the package
    variable.
 3. Record what was detected in `Metadata` so consumers know whether the data is absent
-   because the cluster lacks the feature or because it had no rows.
-4. Prefer `information_schema` relations over `crdb_internal` ones: they are supported
+   because the cluster lacks the feature or because it had no rows. Record *detected* and
+   *exported* separately (see `ASHInfo.Views` vs `ASHInfo.ExportedViews`): an `Optional`
+   table that fails is a warning, and metadata must not claim its file exists.
+4. Record cluster settings as pointers when a consumer would misread the zero value — a
+   failed `SHOW CLUSTER SETTING` read must serialize as `null`, not as `false`, or
+   "the exporter could not tell" becomes "the feature was off". Log such read failures at
+   `Warn`, not `Debug`; `Debug` is invisible at the default log level.
+5. Prefer `information_schema` relations over `crdb_internal` ones: they are supported
    interfaces and do not require `allow_unsafe_internals` in 26.1+.
-5. Verify against local CockroachDB binaries for a version that has the feature and one
+6. Check how the relation is actually served before trusting `TimeColumn` filtering. A
+   view over a stored table filters normally, but a virtual table backed by an RPC
+   fan-out may cap its result *before* the predicate is applied, so a time range can
+   silently return zero rows. Where the cap cannot be lifted, record it in `Metadata` and
+   warn when the requested range is outside what the relation can serve.
+7. Set `Table.ExactTimeRange` for relations whose `TimeColumn` is a raw event or sample
+   timestamp. The default widens the range to whole-hour boundaries to match the SQL
+   statistics aggregation interval, which adds up to two hours of unrequested rows to a
+   per-event relation.
+8. Verify against local CockroachDB binaries for a version that has the feature and one
    that does not.
 
 ### Adding a New CLI Command

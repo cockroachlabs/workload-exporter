@@ -36,9 +36,20 @@ ASH samples what active sessions are doing and what each sample was waiting on. 
 **Technical Details:**
 - Availability is detected by probing `information_schema.tables` for the ASH views, not by parsing the cluster version, so the export adapts to backports and to clusters where ASH is unavailable.
 - The `information_schema` views are used in preference to the equivalent `crdb_internal` views because they are the supported interface and do not require `allow_unsafe_internals`.
-- Both exports are filtered on `sample_time` using the configured time range, and both are optional: if a view exists but cannot be read, the export logs a warning and continues.
-- `metadata.json` records ASH availability and the relevant `obs.ash.*` settings under the `ash` key.
+- Both exports are filtered on `sample_time` using the configured time range, and both are optional: if a view exists but cannot be read, the export logs a warning and continues. A view that fails leaves no CSV behind, and is recorded in `metadata.json` under `views` but not `exported_views`.
+- The ASH time range is applied exactly, without the whole-hour widening used for the hour-aggregated SQL statistics tables, which on a per-second relation would add up to two hours of unrequested rows.
+- `metadata.json` records ASH availability and the relevant `obs.ash.*` settings under the `ash` key. Settings that could not be read are recorded as `null`, distinguishing them from a cluster that reported `false`.
 - `obs.ash.enabled` defaults to `false` in 26.2 and `true` in 26.3. When sampling is disabled the exported CSVs contain only a header row.
+
+**26.2 limitation — the in-memory view cannot serve historical ranges.**
+
+On 26.2 the in-memory cluster view is the only ASH source. It is populated by an RPC fan-out in which each node returns its newest `obs.ash.response_limit` samples (10,000 by default); the `sample_time` predicate is applied by the SQL layer *after* that cap, not pushed down into the fan-out. The cap is therefore a hard horizon rather than a limit within the requested window:
+
+- The reachable window is roughly `response_limit / (active sessions)` seconds per node — minutes on a quiet cluster, seconds on a busy one.
+- A requested range ending before that horizon exports a header-only CSV, with no error and nothing to distinguish it from a window in which the cluster was genuinely idle.
+- The exporter records `response_limit` and `buffer_size` in `metadata.json` and warns when the requested range ends more than five minutes in the past on a cluster with no persisted view.
+
+26.3+ clusters are unaffected: the persisted view reads a stored table, so its time-range filter behaves normally and the in-memory view only supplements it with samples not yet flushed.
 
 ### CockroachDB 26.1+
 

@@ -217,13 +217,15 @@ Active Session History (ASH) samples what active sessions are doing and what eac
 - **`information_schema.crdb_persisted_active_session_history.csv`** - Persisted ASH samples (CockroachDB 26.3+), retained for `obs.ash.compaction.retention_period` (7 days by default)
 - **`information_schema.crdb_cluster_active_session_history.csv`** - Cluster-wide in-memory ASH samples (CockroachDB 26.2+), including recent samples not yet flushed to the persisted table
 
-`metadata.json` records what was found under the `ash` key, including `obs.ash.enabled`, `obs.ash.enrichment.enabled`, and `obs.ash.sample_interval` (the interval each sample represents).
+`metadata.json` records what was found under the `ash` key: `available`, the `obs.ash.*` settings (`enabled`, `enrichment_enabled`, `sample_interval`, `retention_period`, `response_limit`, `buffer_size`), `views` (the ASH views the cluster exposes) and `exported_views` (the subset that produced a CSV). A setting the exporter could not read is recorded as `null` rather than `false`, so "sampling was off" is never confused with "could not tell". A view listed in `views` but not in `exported_views` exists in the cluster but could not be read, and has no file in the export.
 
 Notes:
 - ASH sampling is off by default in 26.2 (`obs.ash.enabled`) and on by default in 26.3. When it is off, the exported files contain only a header row and the exporter logs a warning.
 - Statement text in ASH is a fingerprint, with literals replaced by `_`, the same form used in `crdb_internal.statement_statistics`.
 - Per-execution columns (`user`, `plan_gist`, `canary_stats`, `txn_id`, `session_id`) are populated only when `obs.ash.enrichment.enabled` is set.
 - ASH is sampled every second per active session, so a wide time range on a busy cluster can produce a large export. Narrow `--start`/`--end` if export size is a concern.
+- Unlike the SQL statistics tables, whose time range is widened to whole-hour boundaries to match the aggregation interval, ASH is exported for exactly the requested `--start`/`--end`.
+- **On clusters without persisted ASH (26.2), historical time ranges may export nothing.** The in-memory cluster view is served by a fan-out that returns each node's newest `obs.ash.response_limit` samples (10,000 by default) *before* the time-range filter is applied, so it cannot reach further back than those samples span — minutes on a quiet cluster, seconds on a busy one. A range ending outside that horizon produces a header-only CSV rather than an error; the exporter warns when it detects this. Clusters on 26.3+ are unaffected, because the persisted view filters normally.
 
 ### Schema Information
 - **`[database_name].schema.txt`** - CREATE statements for all tables in each database
