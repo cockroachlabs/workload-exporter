@@ -1,0 +1,78 @@
+name: Integration
+
+# The cross-version integration tests start a real CockroachDB node per version and
+# download ~900 MB of binaries, so they are too slow and too bandwidth-heavy to run on
+# every push. They run nightly against the default branch instead, plus on demand.
+#
+# Neither trigger below works until this file is on the default branch: GitHub runs
+# scheduled workflows only from the default branch, and workflow_dispatch requires the
+# workflow to exist there too (dispatching from a feature branch returns 404). The first
+# run will be the first nightly after merge, or a manual dispatch once it is on main.
+on:
+  schedule:
+    # 07:37 UTC (~01:37 America/Denver). Deliberately off the hour: GitHub's scheduler
+    # is most congested at :00, where runs are delayed and sometimes dropped.
+    - cron: '37 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  integration:
+    name: Cross-version integration
+    runs-on: ubuntu-latest
+    # Generous: a cold cache adds several minutes of downloads before any test runs.
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Resolve tested CockroachDB versions
+        id: crdb
+        # Key the binary cache on the version list itself rather than on the file, so
+        # editing an assertion in integration_test.go does not discard ~2 GB of
+        # already-downloaded binaries.
+        run: |
+          versions=$(sed -n '/versions := \[\]string{/,/^\t}/p' pkg/export/integration_test.go \
+            | grep -oE '"v[^"]+"' | tr -d '"' | sort)
+          if [ -z "$versions" ]; then
+            echo "::error file=pkg/export/integration_test.go::could not parse the versions slice; update this step if the slice was renamed or reformatted"
+            exit 1
+          fi
+          echo "Testing against:"
+          while IFS= read -r v; do echo "  $v"; done <<< "$versions"
+          echo "hash=$(printf '%s' "$versions" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache CockroachDB binaries
+        uses: actions/cache@v4
+        with:
+          # testserver downloads into os.TempDir() and skips the download when the
+          # binary is already there with mode 0555, which tar preserves on restore.
+          path: /tmp/cockroach-v*
+          key: crdb-binaries-${{ runner.os }}-${{ steps.crdb.outputs.hash }}
+
+      - name: Runner resources
+        # The suite runs several CockroachDB nodes at once on a 4 vCPU / 16 GB runner.
+        # Memory and disk headroom are the likeliest causes of an unexplained failure,
+        # so record them before the run rather than guessing afterwards.
+        run: |
+          echo "cpus: $(nproc)"
+          free -h
+          df -h /
+
+      - name: Run integration tests
+        # -parallel 2 caps how many CockroachDB nodes start at once. The default is
+        # GOMAXPROCS (4 here), and each node has a 60s deadline to publish its
+        # listening URL; four simultaneous bootstraps on 4 vCPU can miss it.
+        run: go test -tags=integration -v -timeout 50m -parallel 2 ./pkg/export/
