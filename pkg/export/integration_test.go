@@ -31,10 +31,11 @@ func TestCrossVersionCompatibility(t *testing.T) {
 		"v24.1.25",
 		"v24.3.25",
 		"v25.2.11",
-		"v25.4.3",
+		"v25.4.17",
 		"v26.1.0-beta.3",
-		"v26.2.0-beta.3",
-		"v26.3.0", // first version with persisted active session history
+		"v26.2.7",
+		"v26.3.2", // first release series with persisted active session history
+		"v26.4.0-alpha.1",
 	}
 
 	for _, version := range versions {
