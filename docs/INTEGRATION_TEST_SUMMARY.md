@@ -112,11 +112,16 @@ To add new versions, edit the `versions` slice in `integration_test.go`.
 
 ## Performance Characteristics
 
-- **First run:** 5-10 minutes (downloads binaries)
-- **Subsequent runs:** 1-2 minutes (uses cache)
-- **Per-version test:** 20-40 seconds
-- **Parallelization:** Tests run in parallel by default
-- **Disk usage:** ~100MB per version (cached in ~/.cockroach-go)
+Measured on a GitHub-hosted `ubuntu-latest` runner (4 vCPU, 16 GB) with `-parallel 2`:
+
+- **Full job, cold cache (8 versions):** ~60 seconds, including ~1.1 GB of downloads
+- **Per-version test:** 6-8 seconds
+- **Warm cache, 12-core workstation:** ~45 seconds for all eight
+- **Parallelization:** subtests run in parallel, bounded by `-parallel` (default `GOMAXPROCS`)
+- **Disk usage:** ~125-145 MB downloaded per version, extracting to ~275-325 MB each
+  (~2.4 GB total), cached in the system temp directory (`$TMPDIR`, or `/tmp` on Linux)
+
+See [TESTING.md](TESTING.md) for the full performance and troubleshooting notes.
 
 ## Next Steps
 
@@ -146,9 +151,9 @@ To add new versions, edit the `versions` slice in `integration_test.go`.
 
 If you encounter issues:
 
-1. **Binary download failures:** Clear cache with `rm -rf ~/.cockroach-go`
+1. **Binary download failures:** clear the cached binaries with `rm -f /tmp/cockroach-v*` (Linux) or `rm -f "$TMPDIR"/cockroach-v*` (macOS)
 2. **Timeout errors:** Increase timeout with `-timeout=30m`
-3. **Port conflicts:** Reduce parallelism with `GOMAXPROCS=1`
+3. **Port conflicts:** Reduce parallelism with `-parallel 1`
 4. **Build tags:** Don't forget `-tags=integration`
 
 ## Example Output

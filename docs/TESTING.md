@@ -33,11 +33,11 @@ go test -tags=integration -v -timeout=20m ./pkg/export/
 ```
 
 **⚠️ Important Notes:**
-- First run will download CockroachDB binaries (~100MB per version) and may take 5-10 minutes
-- Subsequent runs use cached binaries and are much faster (1-2 minutes)
-- Tests run in parallel for faster execution
-- Requires at least 500MB of free disk space for cached binaries
-- Use a 20-minute timeout to account for binary downloads
+- First run downloads a CockroachDB binary per version: ~125-145 MB compressed each, about 1.1 GB for the current eight-version matrix
+- Binaries extract to ~275-325 MB each, about 2.4 GB total, and are cached in the system temp directory (`$TMPDIR`, or `/tmp` on Linux)
+- Subsequent runs reuse the cached binaries and skip the downloads entirely
+- Subtests run in parallel, bounded by `-parallel` (default `GOMAXPROCS`)
+- A 20-minute timeout is ample; see [Performance](#performance) for measured times
 
 ## Cross-Version Compatibility
 
@@ -87,28 +87,30 @@ make test-integration
 
 Ensure all versions pass before releasing.
 
-### GitHub Actions (Optional)
+### GitHub Actions
 
-To run integration tests in CI, add to `.github/workflows/ci.yaml`:
+Integration tests run nightly via `.github/workflows/integration.yaml`, at 07:37 UTC
+against the default branch, plus on demand:
 
-```yaml
-integration-tests:
-  runs-on: ubuntu-latest
-  steps:
-    - uses: actions/checkout@v3
-    - uses: actions/setup-go@v4
-      with:
-        go-version: '1.21'
-    - name: Cache CockroachDB binaries
-      uses: actions/cache@v3
-      with:
-        path: ~/.cockroach-go
-        key: ${{ runner.os }}-cockroach-binaries-${{ hashFiles('**/integration_test.go') }}
-    - name: Run integration tests
-      run: make test-integration
+```bash
+gh workflow run integration.yaml --ref main
 ```
 
-**Note:** Integration tests should be run on-demand (workflow_dispatch) or on a schedule, not on every PR, due to their runtime.
+They are deliberately *not* part of `ci.yaml`, which runs on every push and pull
+request: a run starts a real CockroachDB node per version and pulls ~1.1 GB of binaries,
+which is too slow and too bandwidth-heavy for per-push CI.
+
+Two details of that workflow worth knowing if you change it:
+
+- Binaries are cached on a key derived from the version list itself rather than from
+  `hashFiles()` over `integration_test.go`, so editing an assertion does not discard the
+  cache. Bumping a version does, by design.
+- It runs with `-parallel 2`. The default is `GOMAXPROCS` (4 on a standard runner), and
+  each cluster has a hard 60-second startup deadline that simultaneous bootstraps on
+  4 vCPU could miss.
+
+Note that `workflow_dispatch` only works once the workflow is on the default branch;
+dispatching it from a feature branch returns a 404.
 
 ## Validation Details
 
@@ -134,33 +136,55 @@ Each integration test validates:
 
 ### Binary Download Failures
 
-If binary downloads fail, the testserver package will retry automatically. If issues persist:
+`testserver` caches each binary in the system temp directory, not under a dedicated
+dotfile directory. If a download fails or leaves a truncated binary, remove the cached
+copies and retry:
 
 ```bash
-# Clear the cache and retry
-rm -rf ~/.cockroach-go
+# Linux
+rm -f /tmp/cockroach-v*
+# macOS (TMPDIR is per-user, not /tmp)
+rm -f "$TMPDIR"/cockroach-v*
+
 make test-integration
 ```
 
+A binary is only reused when it is present with mode `0555`, so a partial download is
+re-fetched rather than used.
+
 ### Timeout Errors
 
-If tests timeout:
-- First run with binary downloads may take 10+ minutes
-- Increase timeout: `go test -tags=integration -timeout=30m ./pkg/export/`
-- Check available disk space
+If tests time out:
+- Confirm the downloads are progressing; a cold cache pulls ~1.1 GB
+- Increase the timeout: `go test -tags=integration -timeout=30m ./pkg/export/`
+- Each cluster has its own 60-second deadline to start and publish its listening URL,
+  independent of the `go test` timeout. On a CPU-constrained machine, lower
+  `-parallel` rather than raising the timeout.
 
 ### Port Conflicts
 
-Each test uses a random port, but if you see "address already in use" errors:
-- Tests run in parallel; reduce parallelism with: `GOMAXPROCS=1 make test-integration`
+Each test uses a random port, but if you see "address already in use" errors, reduce how
+many clusters run at once:
+
+```bash
+go test -tags=integration -v -parallel 1 ./pkg/export/
+```
 
 ## Performance
 
-Approximate test times:
+Measured, not estimated. On a GitHub-hosted `ubuntu-latest` runner (4 vCPU, 16 GB RAM)
+with `-parallel 2`, the whole job including a cold-cache download of all eight binaries:
 
-- **First run** (with downloads): 5-10 minutes
-- **Cached runs**: 1-2 minutes
-- **Single version**: 20-40 seconds
+| | |
+|---|---|
+| Full job, cold cache (8 versions) | ~60 s |
+| Per version | 6-8 s |
+
+On a 12-core workstation with a warm cache, the same eight versions take ~45 s.
+
+The downloads are a smaller share of the total than they look: the runner pulls ~1.1 GB
+in well under a minute. Disk is not a constraint either — a standard runner has ~86 GB
+free, against ~2.4 GB of extracted binaries.
 
 ## Future Enhancements
 
