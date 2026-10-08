@@ -8,15 +8,69 @@ The workload-exporter tool supports **CockroachDB 24.1 and later**.
 
 | CockroachDB Version | Support Status | Notes |
 |---------------------|----------------|-------|
+| 26.4.x | ✅ Supported | Tested against a pre-release alpha; enrichment on by default |
+| 26.3.x | ✅ Supported | Adds persisted Active Session History export |
+| 26.2.x | ✅ Supported | Adds in-memory Active Session History export |
 | 26.1.x | ✅ Supported | Requires automatic `allow_unsafe_internals` enablement |
 | 25.4.x | ✅ Supported | Fully tested |
 | 25.2.x | ✅ Supported | Fully tested |
 | 24.3.x | ✅ Supported | Fully tested |
-| 24.2.x | ✅ Supported | Fully tested |
+| 24.2.x | ⚠️  Expected to work | Not in the integration matrix |
 | 24.1.x | ✅ Supported | Fully tested |
 | < 24.1 | ⚠️  May work | Not tested, not officially supported |
 
 ## Version-Specific Behavior
+
+### CockroachDB 26.2+ / 26.3+
+
+**Change:** Introduction of Active Session History (ASH)
+
+ASH samples what active sessions are doing and what each sample was waiting on. The exporter exports it when the cluster provides it:
+
+| Relation | Available from | Contents |
+|----------|----------------|----------|
+| `information_schema.crdb_cluster_active_session_history` | 26.2 | Cluster-wide in-memory samples |
+| `information_schema.crdb_persisted_active_session_history` | 26.3 | Samples persisted to `system.active_session_history` |
+
+**Impact:** No user action is required. On clusters without ASH the export is unchanged, apart from an informational log line.
+
+**Technical Details:**
+- Availability is detected by probing `information_schema.tables` for the ASH views, not by parsing the cluster version, so the export adapts to backports and to clusters where ASH is unavailable.
+- The `information_schema` views are used in preference to the equivalent `crdb_internal` views because they are the supported interface and do not require `allow_unsafe_internals`.
+- Both exports are filtered on `sample_time` using the configured time range, and both are optional: if a view exists but cannot be read, the export logs a warning and continues. A view that fails leaves no CSV behind, and is recorded in `metadata.json` under `views` but not `exported_views`.
+- The ASH time range is applied exactly, without the whole-hour widening used for the hour-aggregated SQL statistics tables, which on a per-second relation would add up to two hours of unrequested rows.
+- `metadata.json` records ASH availability and the relevant `obs.ash.*` settings under the `ash` key. Settings that could not be read are recorded as `null`, distinguishing them from a cluster that reported `false`.
+- `obs.ash.enabled` defaults to `false` in 26.2 and `true` in 26.3 and later. When sampling is disabled the exported CSVs contain only a header row.
+
+**Which `obs.ash.*` settings exist per version.** Several settings arrived with the persisted ASH work in 26.3, so a 26.2 cluster legitimately has no value for them. The exporter records those as `null` and logs an informational line rather than a warning, since their absence is a version difference and not a fault. Verified by reading `crdb_internal.cluster_settings` on v26.2.0-beta.3, v26.2.0, v26.2.1, v26.2.7, v26.3.0, v26.3.2 and v26.4.0-alpha.1:
+
+| Setting | 26.2 | 26.3 | 26.4 | Default (26.3 / 26.4) |
+|---------|------|------|------|-----------------------|
+| `obs.ash.enabled` | ✅ (default `false`) | ✅ | ✅ | `true` / `true` |
+| `obs.ash.sample_interval` | ✅ | ✅ | ✅ | `1s` / `1s` |
+| `obs.ash.response_limit` | ✅ | ✅ | ✅ | `10000` / `10000` |
+| `obs.ash.buffer_size` | ✅ | ✅ | ✅ | `1000000` / `1000000` |
+| `obs.ash.enrichment.enabled` | ❌ absent | ✅ | ✅ | `false` / **`true`** |
+| `obs.ash.compaction.retention_period` | ❌ absent | ✅ | ✅ | `168h` (7 days) / `168h` |
+| `obs.ash.flush.interval` | ❌ absent | ✅ | ✅ | `10m` / `10m` |
+
+The absence of enrichment in 26.2 holds across the whole series, not just early betas: v26.2.7 still has no `obs.ash.enrichment.enabled`. 26.4 adds further `obs.ash.*` settings (sample labels, KV sample egress, query tags) that the exporter does not read.
+
+Three consequences for reading an export:
+
+- The per-execution ASH columns (`user`, `plan_gist`, `canary_stats`, `txn_id`, `session_id`) are **always NULL on 26.2**, because enrichment does not exist there.
+- On 26.3 those columns are NULL unless the cluster explicitly enabled `obs.ash.enrichment.enabled`, which is off by default. **In 26.4 the default flips to `true`**, so they are populated unless someone turned enrichment off.
+- `retention_period` is absent from `metadata.json` on 26.2. This is expected: there is no persisted ASH to retain.
+
+**26.2 limitation — the in-memory view cannot serve historical ranges.**
+
+On 26.2 the in-memory cluster view is the only ASH source. It is populated by an RPC fan-out in which each node returns its newest `obs.ash.response_limit` samples (10,000 by default); the `sample_time` predicate is applied by the SQL layer *after* that cap, not pushed down into the fan-out. The cap is therefore a hard horizon rather than a limit within the requested window:
+
+- The reachable window is roughly `response_limit / (active sessions)` seconds per node — minutes on a quiet cluster, seconds on a busy one.
+- A requested range ending before that horizon exports a header-only CSV, with no error and nothing to distinguish it from a window in which the cluster was genuinely idle.
+- The exporter records `response_limit` and `buffer_size` in `metadata.json` and warns when the requested range ends more than five minutes in the past on a cluster with no persisted view.
+
+26.3+ clusters are unaffected: the persisted view reads a stored table, so its time-range filter behaves normally and the in-memory view only supplements it with samples not yet flushed.
 
 ### CockroachDB 26.1+
 
@@ -42,8 +96,13 @@ The workload-exporter includes comprehensive integration tests that validate fun
 - v24.1.25
 - v24.3.25
 - v25.2.11
-- v25.4.3
+- v25.4.17
 - v26.1.0-beta.3
+- v26.2.7
+- v26.3.2
+- v26.4.0-alpha.1
+
+This list is the one in `pkg/export/integration_test.go`; keep the two in sync when bumping.
 
 See [TESTING.md](TESTING.md) for details on running integration tests.
 

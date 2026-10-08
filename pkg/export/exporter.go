@@ -7,8 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/jackc/pgx/v4"
-	"github.com/sirupsen/logrus"
 	"io"
 	"net/url"
 	"os"
@@ -16,6 +14,9 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v4"
+	"github.com/sirupsen/logrus"
 )
 
 // ExporterVersion is the current version of the exporter tool.
@@ -90,6 +91,7 @@ type Metadata struct {
 	SqlStatsAggregationInterval time.Duration `json:"sql.stats.aggregation.interval"`
 	SqlStatsFlushInterval       time.Duration `json:"sql.stats.flush.interval"`
 	VirtualCluster              bool          `json:"virtual_cluster"`
+	ASH                         ASHInfo       `json:"ash"`
 }
 
 // Table represents a CockroachDB table to be exported with optional time-based filtering.
@@ -100,6 +102,12 @@ type Table struct {
 	Name string
 	// TimeColumn is the column name used for time-based filtering (empty if not applicable)
 	TimeColumn string
+	// ExactTimeRange exports exactly the configured time range instead of widening it to
+	// whole-hour boundaries. The default widening exists so that hour-aggregated SQL
+	// statistics rows overlapping the requested window are not dropped; it is wrong for
+	// tables whose TimeColumn is a raw event or sample timestamp, where it would add up
+	// to two hours of unrequested rows.
+	ExactTimeRange bool
 	// Optional indicates that export failures should be logged as warnings rather than errors.
 	// Use this for tables that may not be available in all cluster configurations (e.g. Cloud virtual clusters).
 	Optional bool
@@ -158,7 +166,7 @@ var exportTables = []Table{
 			` ROUND((metrics->>'sys.totalmem')::FLOAT / 1073741824, 1) AS total_mem_gib` +
 			` FROM crdb_internal.kv_node_status`,
 	},
-	{Database: "", Name: "crdb_internal.table_indexes", TimeColumn: "", Scope: TenantScopeMain},           // Use "" to query across all databases
+	{Database: "", Name: "crdb_internal.table_indexes", TimeColumn: "", Scope: TenantScopeMain},          // Use "" to query across all databases
 	{Database: "", Name: "crdb_internal.index_usage_statistics", TimeColumn: "", Scope: TenantScopeMain}, // Use "" to query across all databases
 	{Database: "system", Name: "table_statistics", TimeColumn: "", Scope: TenantScopeMain},
 	{
@@ -254,8 +262,10 @@ func (exporter *Exporter) Close() error {
 //   - Cluster metadata (version, ID, name, organization, settings)
 //   - Database schemas (CREATE statements for all user databases)
 //   - Zone configurations
-//   - Statistics tables (statement_statistics, transaction_statistics, transaction_contention_events, gossip_nodes, node_cpu_mem, table_indexes across all databases, system.table_statistics)
+// - Statistics tables (statement_statistics, transaction_statistics, transaction_contention_events, gossip_nodes, node_cpu_mem, table_indexes across all
+// databases, system.table_statistics)
 //   - Cluster settings (crdb_internal.cluster_settings, system.settings) with sensitive values redacted
+//   - Active session history, when the cluster provides it (see ash.go)
 //
 // The statistics tables are filtered by the TimeRange specified in Config.
 // In virtualized clusters, tables with TenantScopeBoth are exported once per virtual cluster,
@@ -348,8 +358,13 @@ func (exporter *Exporter) Export() error {
 		return fmt.Errorf("failed to export all zone configurations: %w", err)
 	}
 
+	// Active session history is only available on clusters that support it, so the
+	// tables to export are determined per cluster.
+	ashInfo := exporter.detectASH(ctx)
+	tables := append(slices.Clone(exportTables), ashTablesFor(ashInfo.Views)...)
+
 	logrus.Info("starting table export")
-	for _, table := range exportTables {
+	for _, table := range tables {
 		logrus.Infof(" exporting table '%s.%s'", table.Database, table.Name)
 		if err := exporter.exportTable(ctx, tempDir, table, agg); err != nil {
 			if table.Optional {
@@ -358,9 +373,21 @@ func (exporter *Exporter) Export() error {
 			}
 			return fmt.Errorf("failed to export data for table %s.%s: %w", table.Database, table.Name, err)
 		}
+		// Record ASH views only once their file exists, so metadata distinguishes a view
+		// the cluster exposes from one the export actually captured.
+		if table.Database == ashSchema && slices.Contains(ashInfo.Views, table.Name) {
+			ashInfo.ExportedViews = append(ashInfo.ExportedViews, table.Name)
+		}
 	}
 	logrus.Info("finished table export")
 
+	for _, view := range ashInfo.Views {
+		if !slices.Contains(ashInfo.ExportedViews, view) {
+			logrus.Warnf("active session history view %s.%s exists in this cluster but could not be exported; metadata.json records it under 'views' but not 'exported_views'", ashSchema, view)
+		}
+	}
+
+	metadata.ASH = ashInfo
 	metadata.VirtualCluster = exporter.SystemDb != nil
 
 	metadataFile := filepath.Join(tempDir, "metadata.json")
@@ -471,7 +498,9 @@ func (exporter *Exporter) exportAllZoneConfigurations(ctx context.Context, tempD
 
 }
 
-func (exporter *Exporter) exportCreateStatements(ctx context.Context, db string, tempDir string) error {
+func (exporter *Exporter) exportCreateStatements(
+	ctx context.Context, db string, tempDir string,
+) error {
 
 	filename := fmt.Sprintf("%s.schema.txt", db)
 	dataFile := filepath.Join(tempDir, filename)
@@ -547,7 +576,9 @@ func (exporter *Exporter) userDatabases() ([]string, error) {
 // it establishes a system connection and retries automatically. For TenantScopeBoth
 // tables, the main virtual cluster is always exported, and the system virtual cluster
 // is exported with a ".system" filename suffix when in virtualized cluster mode.
-func (exporter *Exporter) exportTable(ctx context.Context, dir string, table Table, aggregationInterval time.Duration) error {
+func (exporter *Exporter) exportTable(
+	ctx context.Context, dir string, table Table, aggregationInterval time.Duration,
+) error {
 	scope := table.Scope
 	if scope == "" {
 		scope = TenantScopeMain
@@ -586,7 +617,14 @@ func (exporter *Exporter) exportTable(ctx context.Context, dir string, table Tab
 // doExportTable performs the actual table export using the provided connection.
 // filenameSuffix is appended before the ".csv" extension (e.g. ".system" produces
 // "crdb_internal.cluster_settings.system.csv"). Pass an empty string for no suffix.
-func (exporter *Exporter) doExportTable(ctx context.Context, dir string, table Table, aggregationInterval time.Duration, conn *pgx.Conn, filenameSuffix string) error {
+func (exporter *Exporter) doExportTable(
+	ctx context.Context,
+	dir string,
+	table Table,
+	aggregationInterval time.Duration,
+	conn *pgx.Conn,
+	filenameSuffix string,
+) error {
 	// Create filename - if database is empty, just use table name
 	var filename string
 	if table.Database == "" {
@@ -601,12 +639,23 @@ func (exporter *Exporter) doExportTable(ctx context.Context, dir string, table T
 	if err != nil {
 		return err
 	}
-	defer func(file *os.File) {
-		err := file.Close()
-		if err != nil {
+	// A failed export must not leave a partial CSV behind. The file is created before
+	// the cluster is queried, so a permission error leaves it empty and a mid-COPY
+	// failure leaves it header-only; either would be zipped and read downstream as a
+	// table that legitimately had no rows. Optional tables make this reachable in
+	// normal operation, since their failures are warnings rather than aborts.
+	completed := false
+	defer func() {
+		if err := file.Close(); err != nil {
 			logrus.WithError(err).Debug("failed to close file")
 		}
-	}(file)
+		if completed {
+			return
+		}
+		if err := os.Remove(dataFile); err != nil && !os.IsNotExist(err) {
+			logrus.WithError(err).Warnf("failed to remove partial export file %s", dataFile)
+		}
+	}()
 
 	// Construct table reference - handle empty database for cross-database queries
 	var tableRef string
@@ -651,10 +700,15 @@ func (exporter *Exporter) doExportTable(ctx context.Context, dir string, table T
 		// Use a SQL query to export data in CSV format
 		var where string
 		if table.TimeColumn != "" {
+			rangeStart, rangeEnd := exporter.Config.TimeRange.Start, exporter.Config.TimeRange.End
+			if !table.ExactTimeRange {
+				rangeStart = startTime(rangeStart) // offset for aggregation interval -- TODO
+				rangeEnd = endTime(rangeEnd)
+			}
 			where = fmt.Sprintf("WHERE %s BETWEEN '%s' and '%s'",
 				pgx.Identifier{table.TimeColumn}.Sanitize(),
-				startTime(exporter.Config.TimeRange.Start).Format("2006-01-02 15:04:05"), // offset for aggregation interval -- TODO
-				endTime(exporter.Config.TimeRange.End).Format("2006-01-02 15:04:05"),
+				rangeStart.Format("2006-01-02 15:04:05"),
+				rangeEnd.Format("2006-01-02 15:04:05"),
 			)
 		}
 
@@ -671,6 +725,7 @@ func (exporter *Exporter) doExportTable(ctx context.Context, dir string, table T
 		return err
 	}
 
+	completed = true
 	return nil
 }
 

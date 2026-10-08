@@ -41,26 +41,39 @@ go test -tags=integration -v -timeout=20m ./pkg/export/
 
 ## Cross-Version Compatibility
 
-The integration tests verify compatibility with:
+The integration tests verify compatibility with the versions listed in the `versions`
+slice in `pkg/export/integration_test.go`, which is the single source of truth:
 
-- CockroachDB 24.1.x (latest patch version)
-- CockroachDB 24.2.x (latest patch version)
-- CockroachDB 24.3.x (latest patch version)
-- CockroachDB 25.2.x (latest patch version)
-- CockroachDB 26.1.x (latest patch version)
+- CockroachDB v24.1.25
+- CockroachDB v24.3.25
+- CockroachDB v25.2.11
+- CockroachDB v25.4.17
+- CockroachDB v26.1.0-beta.3
+- CockroachDB v26.2.7
+- CockroachDB v26.3.2
+- CockroachDB v26.4.0-alpha.1
 
 **Note for CockroachDB 26.1+:** The exporter automatically detects the version and enables the `allow_unsafe_internals` setting (introduced in v26.1) to access `crdb_internal` tables. This is handled transparently in the `NewExporter` function.
 
-To add a new version to test, edit `pkg/export/integration_test.go` and add the version to the `versions` slice:
+To add or bump a version, edit that slice:
 
 ```go
 versions := []string{
-    "v24.1.6",
-    "v24.2.5",
-    "v24.3.0",
-    "v25.1.0", // Add new versions here
+    "v24.1.25",
+    "v24.3.25",
+    "v25.2.11",
+    "v25.4.17",
+    "v26.1.0-beta.3",
+    "v26.2.7",
+    "v26.3.2",
+    "v26.4.0-alpha.1", // Add new versions here
 }
 ```
+
+The version must have a published binary for the platform the tests run on; `testserver`
+downloads from `binaries.cockroachdb.com`. Also update the lists in
+[COMPATIBILITY.md](COMPATIBILITY.md) and `INTEGRATION_TEST_SUMMARY.md`, which copy this
+set by hand.
 
 ## CI/CD Integration
 
